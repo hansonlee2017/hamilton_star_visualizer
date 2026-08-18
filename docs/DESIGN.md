@@ -1,6 +1,8 @@
 # Hamilton STAR Visualizer — Design Doc
 
-Status: **approved for implementation** (Phase 0 not yet started)
+Status: **Phases 0-3 implemented and verified end-to-end; Phase 4 mostly
+done opportunistically.** See [PLAN.md](PLAN.md) for per-phase status and
+two real bugs found (and fixed) during verification.
 Last updated: 2026-08-18
 
 ## 1. Objective

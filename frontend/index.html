@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Hamilton Visualizer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #1b1e23; color: #e8eaed; font-family: system-ui, sans-serif; overflow: hidden; }
+    #canvas-container { position: absolute; inset: 0; }
+    #canvas-container canvas { display: block; }
+
+    #hud { position: absolute; top: 12px; left: 12px; z-index: 10; pointer-events: none; }
+    #status { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; background: rgba(20,22,26,0.85); padding: 6px 10px; border-radius: 6px; font-size: 13px; }
+    #status .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; }
+    #status.connected .dot { background: #35c46a; }
+    #status.disconnected .dot { background: #d9534f; }
+
+    #tooltip { position: absolute; z-index: 10; pointer-events: none; background: rgba(20,22,26,0.92); border: 1px solid #3a3f47; padding: 6px 8px; border-radius: 6px; font-size: 12px; line-height: 1.4; display: none; max-width: 260px; }
+    #tooltip .name { font-weight: 600; }
+    #tooltip .type { color: #9aa0a8; }
+
+    #legend { position: absolute; bottom: 12px; left: 12px; z-index: 10; background: rgba(20,22,26,0.85); border-radius: 6px; padding: 8px 10px; font-size: 12px; pointer-events: auto; }
+    #legend h3 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #9aa0a8; font-weight: 600; }
+    #legend .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    #legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+    #log-panel { position: absolute; top: 12px; right: 12px; bottom: 12px; width: 340px; z-index: 10; background: rgba(20,22,26,0.9); border-radius: 6px; display: flex; flex-direction: column; overflow: hidden; }
+    #log-panel h3 { margin: 0; padding: 8px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #9aa0a8; border-bottom: 1px solid #3a3f47; font-weight: 600; }
+    #log-list { flex: 1; overflow-y: auto; padding: 4px 0; font-size: 12px; }
+    #log-list .entry { padding: 5px 10px; border-bottom: 1px solid #262a30; }
+    #log-list .entry .op { color: #7fb5ff; font-weight: 600; }
+    #log-list .entry .detail { color: #b7bcc4; }
+    #log-list .entry .time { color: #666; font-size: 10px; float: right; }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+
+  <div id="hud">
+    <div id="status" class="disconnected"><span class="dot"></span><span id="status-text">connecting...</span></div>
+  </div>
+
+  <div id="tooltip"></div>
+
+  <div id="legend">
+    <h3>Legend</h3>
+    <div id="legend-rows"></div>
+  </div>
+
+  <div id="log-panel">
+    <h3>Event Log</h3>
+    <div id="log-list"></div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/static/vendor/three.module.js",
+        "three/addons/controls/OrbitControls.js": "/static/vendor/OrbitControls.js"
+      }
+    }
+  </script>
+  <script type="module" src="/static/main.js"></script>
+</body>
+</html>
