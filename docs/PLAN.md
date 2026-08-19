@@ -526,6 +526,92 @@ should be semi-transparent.
       previously had no opacity support at all. Verified live: an empty
       well reads `opacity: 0.5`, a tip spot with a tip reads `opacity: 1`.
 
+## Review round 8 (2026-08-18)
+
+User feedback: pre-filled source-plate wells other than the ones actually
+aspirated from stayed black at startup; the very first round of
+aspirate/dispense sank the tips much too low (rounds 2 and 3 looked
+correct); the plate read as a disconnected array of cubes, unlike the tip
+rack's single blue base.
+
+- [x] **Pre-filled wells not visible until touched.** Root cause:
+      `_broadcast_initial_state()` runs once, synchronously, inside
+      `setup()` -- but `examples/demo_protocol.py` (like most real
+      protocols would) does its own state setup *after* `setup()` returns
+      (`well.set_volume(200)` for every source well, so there's something
+      to watch drain). tip_spot/well categories don't get live callback
+      updates at all (round 6's `_LIVE_CALLBACK_EXCLUDED_CATEGORIES`, to
+      avoid the state-vs-animation race), so a well changed in that
+      after-`setup()` window stayed invisible until an aspirate/dispense
+      happened to touch it -- exactly what made only the actually-aspirated
+      wells look right and everything else look empty. Fixed by adding
+      `VisualizerBackend.wait_for_start()`, which blocks on the existing
+      (round 7) start gate and then re-runs `_broadcast_initial_state()`
+      -- the point a protocol clicks "Start" is exactly the point it's
+      declaring its manual setup finished, so re-snapshotting there closes
+      the gap without reintroducing the round-6 race (nothing here is tied
+      to animation timing). `demo_protocol.py` now calls
+      `backend.wait_for_start()` instead of `server.wait_for_start()`
+      directly. Verified live: before clicking Start, all source-plate
+      wells read `000000` (black) as expected (the fix only fires on
+      Start); immediately after clicking it, both aspirated wells *and*
+      untouched ones (e.g. `source_plate_well_A4`, `H4`, `A12`, `H12`,
+      never touched by the 3-column demo) read the same pre-fill green
+      (`27ca93`)/opacity as each other.
+- [x] **First round's tips too low.** Same *class* of staleness bug as an
+      earlier round's x/y fix, just not yet applied to Z: `animateChannelOp`
+      computed `entry.z + ch.tipLength` synchronously at event-arrival
+      time, but `ch.tipLength` is only updated to the real tip length by a
+      *preceding* `pick_up_tips` leg's `onArrive` callback -- which, on the
+      first round, hadn't necessarily fired yet if events arrived faster
+      than the ~1.6s-per-op animation could drain its backlog (exactly the
+      first round, before the queue has had time to catch up). Every later
+      round was fine because by then the backlog had settled. Fixed by
+      extending the existing lazy-resolution mechanism (`enqueue()`
+      already supported `target.x`/`target.y === null` meaning "resolve
+      when this leg starts") to also accept `target.z` as a function,
+      resolved at the same point -- relying on the same guarantee that
+      already made the x/y fix correct: a channel's queue is strictly
+      FIFO, so by the time a later leg actually starts, every earlier
+      leg's `onComplete`/`onArrive` (including the `pick_up_tips` that
+      sets `ch.tipLength`) is guaranteed to have already run. Verified
+      live: recorded channel 0's world-space height every 50ms across all
+      three rounds and extracted each round's local-minima (the
+      pick_up_tips/aspirate/dispense/discard_tips depths). All three
+      rounds produced the *identical* sequence (`313.65`, `287.94`,
+      `281.75`, `232.2`), i.e. no first-round-only anomaly.
+- [x] **Plate reads as disconnected cubes.** First changed `plate`'s
+      `CATEGORY_COLORS` (and the matching legend entry) from a
+      well-fill-gradient-adjacent green (`0x3d9970`) to a muted purple
+      (`0x6a5a94`), reasoning the base was blending into its own wells'
+      colors the way `tip_rack`'s blue clearly doesn't. The material color
+      changed correctly, but the user reported still seeing no purple at
+      all -- the real bug was two levels deeper. Dumped the actual
+      PyLabRobot resource tree for `source_plate` and its carrier site:
+      the plate sits at `location.z = -3.03` on its `PlateHolder` -- a
+      real, baked-in PLR datum offset (chosen so the plate's own wells, at
+      `+3.03`, land exactly flush with the carrier rail), not "how far the
+      visible base sticks up." Round 7's thin-slab code drew the base from
+      the plate's own local `0` to `THIN_CATEGORY_THICKNESS` (3mm)
+      upward -- for a `TipRack` (whose site offset is exactly `0`) that's
+      the visible surface, but for a `Plate` it put the entire slab
+      *below* the rail, buried inside the carrier's own box (whose height
+      is computed to reach exactly that same rail) -- rendered, correctly
+      colored, and completely invisible. Confirmed numerically before
+      fixing: carrier top and well bottom both read world `y=186.15`,
+      while the plate's slab spanned `183.12`-`186.12`, i.e. entirely
+      under the carrier's opaque geometry. Fixed by lifting a thin
+      category's slab by however far its own placement is recessed below
+      zero (`Math.max(0, -node.location.z)`) before centering it --
+      canceling a negative datum offset the same way round 7 canceled
+      TipSpot's baked `-83.5mm` dz for its pyramid, just at the parent's
+      own placement instead of a child's. `TipRack` (offset `0`) is
+      unaffected. Verified live: the plate's slab now spans world
+      `186.15`-`189.15`, flush with the carrier rail and the wells'
+      bottom, and a screenshot shows a clearly visible purple base/rim
+      around and between the wells on both plates, matching the tip
+      rack's blue-tray look.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

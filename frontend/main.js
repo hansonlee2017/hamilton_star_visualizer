@@ -28,7 +28,12 @@ const CATEGORY_COLORS = {
   mfx_carrier: 0x5a6270,
   tube_carrier: 0x5a6270,
   tip_rack: 0x3d6fa8,
-  plate: 0x3d9970,
+  // Deliberately *not* a shade of green: a plate's base needs to read as a
+  // distinct supporting structure underneath its wells, the same way the
+  // tip rack's blue base reads as distinct from its amber/black tips --
+  // sharing the well-fill-gradient's hue (green, previously 0x3d9970) made
+  // the base blend into its own contents instead of standing apart from it.
+  plate: 0x6a5a94,
   well: 0x59c9a5,
   tip_spot: 0x8a8f98,
   trash: 0x8a3d3d,
@@ -77,7 +82,7 @@ const LEGEND_ENTRIES = [
   ["Carrier", 0x5a6270],
   ["Tip rack", 0x3d6fa8],
   ["Tip spot (empty / tip)", 0x8a8f98],
-  ["Plate", 0x3d9970],
+  ["Plate", 0x6a5a94],
   ["Well (fill level)", 0x59c9a5],
   ["Trash", 0x8a3d3d],
   ["Gantry channel", 0xe0b23d],
@@ -291,12 +296,27 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
       const childZs = (node.children ?? []).map((c) => c.location?.z ?? 0).filter((z) => z > 0);
       const deckSurfaceZ = childZs.length > 0 ? Math.min(...childZs) : 0;
       zOffset = deckSurfaceZ - sizeZ / 2;
+    } else if (isThin) {
+      // A thin category's own *placement* on its parent can itself be
+      // recessed below the surface it visually sits on -- e.g. a Plate's
+      // location.z on its carrier site is -3.03mm, a baked-in PLR datum
+      // offset (the plate's local z=0 reference point, chosen so its own
+      // wells -- at +3.03 -- land exactly flush with the rail), not "how
+      // far above the rail its visible base sticks up." Naively drawing
+      // the thin slab from local 0 upward buried the entire thing below
+      // the rail (inside the carrier's own box, whose sizeZ reaches
+      // exactly up to that same rail): a Plate's base was rendered but
+      // never visible. Cancel a negative placement the same way round 7
+      // canceled TipSpot's baked -83.5mm dz for its pyramid -- lift the
+      // slab by however far its own origin sits below the surface, so its
+      // *bottom* face is flush with the surface instead of buried under
+      // it. A resource placed with location.z >= 0 (e.g. a TipRack, whose
+      // site offset is exactly 0) is unaffected.
+      const ownRecess = Math.max(0, -(node.location?.z ?? 0));
+      zOffset = sizeZ / 2 + ownRecess;
     } else {
-      // Carriers and thin categories both use the normal above-origin
-      // placement -- carriers because their box now rises from their own
-      // base up to their payload (see sizeZ above), thin categories
-      // because a shallow base at their own origin is exactly where their
-      // payload's holder/location math expects it.
+      // Carriers use the normal above-origin placement: their box now
+      // rises from their own base up to their payload (see sizeZ above).
       zOffset = sizeZ / 2;
     }
     mesh.position.set(sizeX / 2, zOffset, -sizeY / 2);
@@ -606,13 +626,19 @@ class Channel {
   // visually is, while this fires exactly on arrival regardless of backup.
   // `target.x`/`target.y` may be `null`, meaning "stay at whatever x/y this
   // leg actually starts from" -- used for the rise-to-safe-height leg,
-  // which must not move horizontally. It can't just capture `this.pos.x/y`
+  // which must not move horizontally. `target.z` may instead be a function
+  // (`() => number`) -- used for the descend/hold legs' tip-length-aware
+  // depth (see animateChannelOp). Neither can just be resolved to a value
   // at enqueue time: since ops routinely arrive faster than their ~1.6s
-  // animation plays out, the queue backs up, and a snapshot taken now can
-  // be stale by the time this leg actually starts (frequently still
-  // showing the channel's *initial* position from before it ever moved).
-  // Resolving null x/y lazily, right when the leg starts in update(),
-  // sidesteps that entirely.
+  // animation plays out, the queue backs up, and a value captured now can
+  // be stale by the time this leg actually starts -- e.g. still the
+  // channel's *initial* position before it ever moved, or (for z) the
+  // *previous* tip's length because the pick_up_tips op that updates
+  // ch.tipLength for the *current* tip hasn't had its own animation reach
+  // that point yet. Resolving both lazily, right when the leg starts in
+  // update(), sidesteps that: by then, this channel's queue is strictly
+  // FIFO, so anything enqueued earlier (including a preceding
+  // pick_up_tips's onArrive) is guaranteed to have already run.
   enqueue(target, duration, onComplete) {
     this.queue.push({ target, duration, onComplete });
   }
@@ -625,6 +651,7 @@ class Channel {
         this.current.from = { ...this.pos };
         if (this.current.target.x === null) this.current.target.x = this.current.from.x;
         if (this.current.target.y === null) this.current.target.y = this.current.from.y;
+        if (typeof this.current.target.z === "function") this.current.target.z = this.current.target.z();
       }
     }
     if (!this.current) return;
@@ -686,8 +713,9 @@ function animateChannelOp(entry, { onArrive, tipLength } = {}) {
   // apex by the tip's own real length -- offsetting by that length keeps
   // the body clear of the target labware, so only the tip appears to enter
   // it (see docs/PLAN.md for the "pipette entering the well" bug this
-  // fixes).
-  const targetZ = entry.z + (tipLength ?? ch.tipLength);
+  // fixes). A function, not a number: see enqueue()'s docstring for why
+  // `ch.tipLength` must be read when the leg *starts*, not now.
+  const targetZ = () => entry.z + (tipLength ?? ch.tipLength);
   // x/y: null means "stay wherever this leg actually starts" -- see
   // enqueue()'s docstring for why that can't just be ch.pos.x/y here.
   ch.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));

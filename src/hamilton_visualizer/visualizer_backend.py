@@ -101,6 +101,26 @@ class VisualizerBackend(LiquidHandlerBackend):
     await self._inner.stop()
     self.setup_finished = False
 
+  async def wait_for_start(self) -> None:
+    """Block until "Start Protocol" is clicked (``VisualizerServer.
+    wait_for_start()``), then re-broadcast every resource's *current* state.
+
+    Use this instead of calling ``self._server.wait_for_start()`` directly
+    if your protocol does any manual state setup between ``lh.setup()`` and
+    this call (e.g. pre-filling wells) -- ``_broadcast_initial_state()``
+    already ran once, synchronously, inside ``setup()``, before that setup
+    code had a chance to run, so it captured the *pre*-fill state. tip_spot/
+    well changes aren't otherwise pushed live (see
+    ``_LIVE_CALLBACK_EXCLUDED_CATEGORIES``), so without this, anything you
+    changed during that window would stay invisible until an aspirate/
+    dispense/pick_up_tips/drop_tips happened to touch it. Re-running it here
+    -- exactly the point your protocol is telling the visualizer "initial
+    setup is done" -- covers that gap.
+    """
+
+    await self._server.wait_for_start()
+    await self._broadcast_initial_state(self.deck)
+
   # tip_spot/well changes driven by pick_up_tips/drop_tips/aspirate/dispense
   # are instead delivered by channel_ops_event() embedding the resulting
   # state directly in the "op" event -- see its docstring for why: a live

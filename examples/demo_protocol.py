@@ -55,7 +55,8 @@ async def main() -> None:
   await server.start()
 
   inner_backend = LiquidHandlerChatterboxBackend(num_channels=8)
-  lh = LiquidHandler(backend=VisualizerBackend(inner_backend, server), deck=deck)
+  backend = VisualizerBackend(inner_backend, server)
+  lh = LiquidHandler(backend=backend, deck=deck)
   await lh.setup()  # also turns on tip/volume tracking -- see VisualizerBackend docstring
 
   # pre-fill the source wells so there's something to aspirate and watch
@@ -66,8 +67,11 @@ async def main() -> None:
 
   # Wait for you to open the visualizer, check the initial deck/tip/liquid
   # state, and click "Start Protocol" -- no arbitrary timer to race against.
+  # backend.wait_for_start() (not server.wait_for_start()) also re-syncs
+  # state at this point, covering the well pre-fill above -- see its
+  # docstring.
   print("Open the visualizer, then click 'Start Protocol' when ready.")
-  await server.wait_for_start()
+  await backend.wait_for_start()
   print("Started.")
 
   # -- a short, representative protocol: for each of the first 3 columns, ---
