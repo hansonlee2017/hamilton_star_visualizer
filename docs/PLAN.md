@@ -923,6 +923,25 @@ type.
       respectively -- confirmed both via the tooltip's rendered HTML and
       a screenshot.
 
+## Review round 14 (2026-08-19)
+
+User feedback: rail number labels sat on a rail's *border* rather than
+within it -- "the number 5 is drawn at the border between rail 4 and 5."
+
+- [x] **Centered rail labels within their own slot.** `addRailLabels()`
+      used the exact same x as `addRailLines()`'s border at that rail
+      number -- correct for a border, but a rail's number should read as
+      labeling its own slot, not the boundary with the rail before it.
+      `RAIL_X_OFFSET_MM + (rail-1)*RAIL_WIDTH_MM` is rail N's *left*
+      border (also where a resource assigned via `rails=N` actually
+      attaches); added `+ RAIL_WIDTH_MM / 2` so the label sits centered
+      between that left border and rail N's right border instead.
+
+      Verified live: rail 5's label now sits at world x=201.25 --
+      exactly midway between its left border (190.0) and right border
+      (212.5, i.e. rail 6's left border) -- and a screenshot shows every
+      label sitting inside its own slot rather than on a dividing line.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

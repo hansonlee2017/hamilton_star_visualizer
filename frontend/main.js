@@ -314,7 +314,12 @@ function addRailLabels(parentGroup, node, deckSurfaceZ) {
   const numRails = node.num_rails;
   if (!numRails) return; // non-Hamilton or otherwise rail-less deck
   for (let rail = RAIL_LABEL_INTERVAL; rail <= numRails; rail += RAIL_LABEL_INTERVAL) {
-    const x = RAIL_X_OFFSET_MM + (rail - 1) * RAIL_WIDTH_MM;
+    // RAIL_X_OFFSET_MM + (rail-1)*RAIL_WIDTH_MM is rail N's *left* border
+    // (the same x addRailLines() draws that border at, and where a
+    // resource assigned via rails=N actually attaches) -- labeling a rail
+    // there reads as sitting on the boundary with the rail *before* it.
+    // +RAIL_WIDTH_MM/2 centers the label within rail N's own slot instead.
+    const x = RAIL_X_OFFSET_MM + (rail - 1) * RAIL_WIDTH_MM + RAIL_WIDTH_MM / 2;
     const sprite = createTextSprite(String(rail));
     sprite.position.copy(mapPoint(x, -15, deckSurfaceZ + 2));
     parentGroup.add(sprite);
