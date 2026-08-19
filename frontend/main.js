@@ -690,7 +690,14 @@ function ensureChannels(numChannels) {
 }
 
 const RISE_MS = 350;
-const TRAVEL_MS = 400;
+// Split into two legs, not one combined diagonal move -- a real Hamilton
+// STAR's x motor is shared by the whole arm and its y motor is per-channel,
+// so a move is physically x-then-y, never simultaneous (see
+// hamilton_visualizer.gantry's module docstring and docs/PLAN.md's
+// round-10 write-up). 200+200 keeps the total roughly the same as the old
+// single 400ms diagonal leg.
+const X_MOVE_MS = 200;
+const Y_MOVE_MS = 200;
 const DESCEND_MS = 350;
 const HOLD_MS = 150;
 const RETRACT_MS = 350;
@@ -721,8 +728,16 @@ function animateChannelOp(entry, { onArrive, tipLength } = {}) {
   const targetZ = () => entry.z + (tipLength ?? ch.tipLength);
   // x/y: null means "stay wherever this leg actually starts" -- see
   // enqueue()'s docstring for why that can't just be ch.pos.x/y here.
+  // Real Hamilton STAR motion order -- the shared-x arm moves first, then
+  // this channel's own y motor, then z finally descends to do the actual
+  // work -- never x/y together and never z before both are in place. See
+  // hamilton_visualizer.gantry's module docstring for the hardware
+  // reasoning (this is the same "x is shared, y is per-channel" fact,
+  // applied to a single channel's own approach instead of across
+  // channels).
   ch.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
-  ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, scaled(TRAVEL_MS));
+  ch.enqueue({ x: entry.x, y: null, z: restZ }, scaled(X_MOVE_MS));
+  ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, scaled(Y_MOVE_MS));
   // onArrive fires exactly when this leg's tween completes -- see enqueue()'s
   // docstring for why that's not the same as a fixed setTimeout delay.
   ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(DESCEND_MS), onArrive);
@@ -792,12 +807,16 @@ function handleOpEvent(msg) {
       // VisualizerBackend.nudge_channel(): a purely cosmetic reposition
       // (real gantry motion planning that has no PLR-level command of its
       // own -- see that method's docstring), not a pipetting op, so no
-      // rise/descend/hold structure: just glide to (x, y) at rest height.
-      // x/y omitted (null) means "leave this axis where it is" -- see
-      // enqueue()'s docstring.
+      // rise/descend/hold structure: just glide at rest height. x-then-y,
+      // never together -- same shared-x-arm/per-channel-y reasoning as
+      // animateChannelOp above. x/y omitted (null/undefined) means "leave
+      // this axis where it is": skip that leg entirely rather than
+      // enqueueing a zero-distance one, so a y-only nudge doesn't pay for
+      // an idle x leg.
       const ch = channels[msg.channel];
       if (ch) {
-        ch.enqueue({ x: msg.x ?? null, y: msg.y ?? null, z: restZ }, scaled(TRAVEL_MS));
+        if (msg.x != null) ch.enqueue({ x: msg.x, y: null, z: restZ }, scaled(X_MOVE_MS));
+        if (msg.y != null) ch.enqueue({ x: msg.x ?? null, y: msg.y, z: restZ }, scaled(Y_MOVE_MS));
       }
       logEvent(
         "nudge_channel",

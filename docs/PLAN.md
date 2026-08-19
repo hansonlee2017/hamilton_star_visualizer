@@ -707,6 +707,36 @@ asked clarifying questions before implementing.
       the same recognizable smiley face as before, produced this time by
       physically-plausible motion.
 
+## Review round 10 (2026-08-18)
+
+User feedback: the x-movement and dispense movements weren't happening in
+the correct order -- should be strictly x-move -> y-move -> z-move ->
+dispense.
+
+- [x] **Diagonal x/y travel, not sequential.** `animateChannelOp()`'s
+      "travel" leg (and `nudge_channel`'s single move) interpolated x and y
+      *together* in one tween -- a diagonal glide, not the real motion
+      order (shared-x arm moves first, then this channel's own y motor --
+      see `hamilton_visualizer.gantry`'s docstring for the same hardware
+      fact applied across channels; this is that same fact applied to one
+      channel's own approach). Split the single combined-XY leg into two
+      sequential legs (`X_MOVE_MS` then `Y_MOVE_MS`, replacing the old
+      single `TRAVEL_MS`) in both `animateChannelOp()` and the
+      `nudge_channel` handler, so x fully completes before y starts, and y
+      fully completes before z (descend) starts -- descend's `onArrive` is
+      what actually triggers the dispense/aspirate/pick-up-tip effect, so
+      this also guarantees dispense never fires until z has descended,
+      which itself never starts until both x and y are in place.
+
+      Verified live: recorded channel 0's (x, y, z) position every 20ms
+      across a full cherry-pick run and classified consecutive samples by
+      which axis was actually changing. The trace is a clean, repeating
+      `x -> y -> z` sequence (each axis's segment fully finishing before
+      the next begins) with no sustained simultaneous-axis segments --
+      the only "mixed" samples are single ~20ms polling-boundary
+      artifacts (one sample landing exactly between two legs), not real
+      simultaneous motion.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
