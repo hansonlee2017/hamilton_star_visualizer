@@ -173,6 +173,46 @@ Goal: pleasant to actually use day-to-day.
 - [ ] Screenshots/GIF in README
 - [ ] Tag a v1 (holding off until this first pass is reviewed)
 
+## Review round 2 (2026-08-18)
+
+User feedback after the first pass: no visible tip geometry, aspirate/
+dispense visually entering the plate rather than using a real channel z,
+switch the demo from `drop_tips` to `discard_tips`, and an aspirate/dispense
+"flow" animation.
+
+- [x] **Tip geometry.** Tips render as a small inverted 4-sided pyramid
+      (`THREE.ConeGeometry(r, h, 4)`) — one nested in each `TipSpot`
+      (visibility toggled by tip-presence state, replacing the old
+      color-swap-on-a-near-zero-height-box approach) and one on each gantry
+      channel (already existed as a 10-segment cone; switched to 4 segments
+      to match). **Bug found while wiring this up:** a `TipSpot`'s
+      `location.z` isn't just zero-height (see the Phase 3 note above) --
+      it's also displaced by a large negative `dz` each tip-rack factory
+      bakes in (e.g. -83.5mm) for firmware pick-up-depth math. Anchoring the
+      pyramid to the spot's own local origin buried it ~100mm below the
+      visible rack. Fixed by threading the parent rack's height down through
+      `buildResourceObject()`'s recursion and using it to cancel that offset
+      out, so the pyramid hangs from just under the rack's visible top
+      surface instead. Also added `VisualizerBackend._broadcast_initial_state()`
+      so a rack that starts pre-filled with tips (the common case) shows
+      them immediately instead of only after each spot's first pick-up --
+      this closes a gap noted in the first review round, and also means a
+      fresh replay starts from the correct initial state.
+- [x] **`discard_tips` instead of `drop_tips`.** Demo protocol switched.
+      No backend/event code changes needed: `LiquidHandler.discard_tips()`
+      is a convenience wrapper that still calls `self.backend.drop_tips(...)`
+      under the hood (targeting the deck's trash), so `VisualizerBackend`'s
+      interception point already covers it — the event log still labels it
+      `drop_tips` (that's the literal backend call), but the target resource
+      correctly shows as `trash` instead of a tip-rack spot.
+- [ ] **Aspirate/dispense channel z.** Currently uses the well's generic
+      top-anchor (`resource_point()`), i.e. the channel stops right at the
+      well opening rather than actually dipping into the liquid. Real
+      options and tradeoffs are being discussed with the user before
+      picking one — see chat.
+- [ ] **Aspirate/dispense flow animation.** Options being discussed with
+      the user before implementing — see chat.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
@@ -182,6 +222,3 @@ Goal: pleasant to actually use day-to-day.
 - [ ] iSWAP / CO-RE gripper + plate-move animation
 - [ ] Hamilton Vantage support
 - [ ] Firmware-accurate motion timing
-- [ ] Sync initial tip/volume state on connect (currently only *changes*
-      after connect are reflected — a rack that starts pre-filled with tips
-      shows the default "empty" color until the first pick-up touches it)

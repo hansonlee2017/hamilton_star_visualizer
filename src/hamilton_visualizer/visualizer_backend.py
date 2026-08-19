@@ -95,6 +95,7 @@ class VisualizerBackend(LiquidHandlerBackend):
     self.setup_finished = True
     self._register_state_callbacks(self.deck)
     await self._server.set_scene(build_scene(self.deck), num_channels=self.num_channels)
+    await self._broadcast_initial_state(self.deck)
 
   async def stop(self) -> None:
     await self._inner.stop()
@@ -113,6 +114,20 @@ class VisualizerBackend(LiquidHandlerBackend):
     resource.register_state_update_callback(make_callback(resource.name))
     for child in resource.children:
       self._register_state_callbacks(child)
+
+  async def _broadcast_initial_state(self, resource) -> None:
+    """Send each resource's *current* state once at startup, not just future
+    changes -- otherwise a tip rack that starts pre-filled with tips (the
+    common case) renders as empty until its first pick-up touches each spot.
+    This also means a replay starts from the correct initial state, since
+    it's recorded in the server's event history like everything else.
+    """
+
+    await self._server.broadcast(
+      {"type": "state", "resource": resource.name, "state": resource.serialize_state()}
+    )
+    for child in resource.children:
+      await self._broadcast_initial_state(child)
 
   # -- pipetting ------------------------------------------------------------
   async def pick_up_tips(self, ops: List[Pickup], use_channels: List[int], **backend_kwargs) -> None:

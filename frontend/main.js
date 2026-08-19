@@ -44,6 +44,13 @@ const DEFAULT_COLOR = 0x6b7280;
 const CARRIER_CATEGORIES = new Set(["tip_carrier", "plate_carrier", "mfx_carrier", "tube_carrier"]);
 const ENVELOPE_PLATFORM_THICKNESS = 10;
 const TIP_PRESENT_COLOR = 0xe0b23d;
+const TIP_EMPTY_COLOR = 0x555a62;
+// A tip's real length (~95mm for a 1000uL Hamilton tip) is much larger than
+// the ~9mm spacing between rack positions -- drawn to true scale, adjacent
+// tips would overlap. These are a visually-legible compromise, not to
+// scale, same tradeoff as the gantry channel glyph size below.
+const TIP_PYRAMID_RADIUS = 3.2;
+const TIP_PYRAMID_HEIGHT = 16;
 const VOLUME_EMPTY_COLOR = new THREE.Color(0x2c4f46);
 const VOLUME_FULL_COLOR = new THREE.Color(0x2ee6a8);
 const PULSE_COLOR = new THREE.Color(0xffffff);
@@ -178,7 +185,7 @@ function colorForNode(node) {
   return CATEGORY_COLORS[node.category] ?? DEFAULT_COLOR;
 }
 
-function buildResourceObject(node, isRoot) {
+function buildResourceObject(node, isRoot, parentSizeZ) {
   const group = new THREE.Group();
   group.name = node.name;
 
@@ -237,10 +244,44 @@ function buildResourceObject(node, isRoot) {
     hoverables.push(mesh);
   }
 
-  resourceIndex.set(node.name, { group, mesh, node, baseColor: mesh ? mesh.material.color.clone() : null });
+  // A tip spot's own box is a near-zero-height placement marker (see
+  // events.py's tip_grab_point() docstring for why), and -- easy to miss --
+  // its *location.z* is likewise not a rendering-relevant surface: tip rack
+  // factories place spots via a large negative dz (e.g. -83.5mm) that's
+  // calibrated for firmware pick-up-depth math, not for "where the tip
+  // visually pokes out." Anchoring the pyramid to the spot's own local
+  // origin buries it far below the rack. Instead, cancel that baked-in
+  // offset out (using the *parent* rack's own height, passed down as
+  // parentSizeZ) so the pyramid hangs from just under the rack's visible
+  // top surface, where a tip actually appears.
+  let tipPyramid = null;
+  if (node.category === "tip_spot") {
+    const geometry = new THREE.ConeGeometry(TIP_PYRAMID_RADIUS, TIP_PYRAMID_HEIGHT, 4);
+    tipPyramid = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color: TIP_PRESENT_COLOR }));
+    const localZ = node.location?.z ?? 0;
+    const rackTopInSpotLocalFrame = (parentSizeZ ?? 0) - localZ;
+    tipPyramid.position.set(
+      sizeX / 2,
+      rackTopInSpotLocalFrame - TIP_PYRAMID_HEIGHT / 2,
+      -sizeY / 2
+    );
+    tipPyramid.rotation.y = Math.PI / 4; // diamond-facing orientation, purely cosmetic
+    tipPyramid.visible = false; // shown by the first "state" event for this spot
+    tipPyramid.userData = { resourceName: node.name, resourceType: node.type, category: node.category };
+    group.add(tipPyramid);
+    hoverables.push(tipPyramid);
+  }
+
+  resourceIndex.set(node.name, {
+    group,
+    mesh,
+    node,
+    baseColor: mesh ? mesh.material.color.clone() : null,
+    tipPyramid,
+  });
 
   for (const child of node.children ?? []) {
-    const childObj = buildResourceObject(child, false);
+    const childObj = buildResourceObject(child, false, sizeZ);
     group.add(childObj);
   }
 
@@ -263,12 +304,13 @@ function loadScene(deckNode) {
 // ---------------------------------------------------------------------------
 function applyState(resourceName, state) {
   const entry = resourceIndex.get(resourceName);
-  if (!entry || !entry.mesh) return;
+  if (!entry) return;
 
   if (Object.prototype.hasOwnProperty.call(state, "tip")) {
     const hasTip = state.tip !== null && state.tip !== undefined;
-    const color = hasTip ? TIP_PRESENT_COLOR : entry.baseColor.getHex();
-    entry.mesh.material.color.setHex(color);
+    if (entry.tipPyramid) entry.tipPyramid.visible = hasTip;
+  } else if (!entry.mesh) {
+    return;
   } else if (Object.prototype.hasOwnProperty.call(state, "volume")) {
     const maxVolume = state.max_volume || 1;
     const frac = THREE.MathUtils.clamp((state.volume ?? 0) / maxVolume, 0, 1);
@@ -305,9 +347,13 @@ class Channel {
     this.body.position.y = 16;
     this.group.add(this.body);
 
-    const tipGeom = new THREE.ConeGeometry(4, 22, 10);
-    this.tipMesh = new THREE.Mesh(tipGeom, new THREE.MeshLambertMaterial({ color: 0x555a62 }));
-    this.tipMesh.position.y = -11;
+    // Same inverted-pyramid shape as the tips resting in the rack (see
+    // buildResourceObject), just a little larger for readability at this
+    // camera distance.
+    const tipGeom = new THREE.ConeGeometry(TIP_PYRAMID_RADIUS * 1.4, TIP_PYRAMID_HEIGHT * 1.4, 4);
+    this.tipMesh = new THREE.Mesh(tipGeom, new THREE.MeshLambertMaterial({ color: TIP_EMPTY_COLOR }));
+    this.tipMesh.position.y = -(TIP_PYRAMID_HEIGHT * 1.4) / 2;
+    this.tipMesh.rotation.y = Math.PI / 4;
     this.tipMesh.visible = false;
     this.group.add(this.tipMesh);
 
@@ -323,7 +369,7 @@ class Channel {
   setTip(visible) {
     this.hasTip = visible;
     this.tipMesh.visible = visible;
-    this.tipMesh.material.color.setHex(visible ? TIP_PRESENT_COLOR : 0x555a62);
+    this.tipMesh.material.color.setHex(visible ? TIP_PRESENT_COLOR : TIP_EMPTY_COLOR);
   }
 
   pulse() {
