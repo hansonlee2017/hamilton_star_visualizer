@@ -65,9 +65,12 @@ stricter: mismatched pick-ups/insufficient volume will now raise).
   (vendored locally, no build step), rendering everything as simple boxes
   from an orthographic camera set to a fixed isometric angle.
 
-Live mode only in this version: open the browser *before* running your
-protocol. There's no replay of a run you missed -- see DESIGN.md's
-"Future / stretch" section.
+Live mode only: open the browser *before* running your protocol to watch it
+happen. If you missed it (or just want to watch again), the **Replay**
+button in the top-left re-sends everything the server has recorded so far,
+paced to approximate the original timing. This is in-memory only -- it does
+not survive restarting the Python process (see DESIGN.md's "Future /
+stretch" section for a durable, capture-to-file version).
 
 ## Project layout
 

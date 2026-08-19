@@ -59,11 +59,17 @@ live events yet.
   "surface" — rendering it literally as a solid box made the deck a giant
   block that also threw off camera framing, and the same problem hid
   plates/tip-racks inside their carrier's box (carrier `size_z` is the full
-  rail envelope, not the carrier's own thickness). Fixed by drawing
-  deck/carrier categories as a thin platform sitting below their own origin,
-  and by framing the camera on the actual built geometry's bounding box
-  instead of trusting any one resource's declared size. See `main.js`,
-  `THIN_ENVELOPE_CATEGORIES`.
+  rail envelope, not the carrier's own thickness). Fixed by drawing the deck
+  as a thin platform sitting below its own origin, and by framing the camera
+  on the actual built geometry's bounding box instead of trusting any one
+  resource's declared size. See `main.js`.
+
+  **Refined further (2026-08-18 review):** a fixed-thickness platform for
+  carriers left plates/tip-racks floating with a visible gap above their
+  carrier. Carriers are now drawn as a solid shaft from their own base up to
+  wherever their payload's holder (`PlateHolder`/`ResourceHolder` child)
+  actually sits, so the payload rests flush on top instead of floating or
+  being buried — see `CARRIER_CATEGORIES` in `main.js`.
 
 ## Phase 2 — Live resource state (tips, liquid)
 
@@ -123,6 +129,17 @@ Goal: pick_up_tips / drop_tips / aspirate / dispense visibly animate the
       volume detail, and channel objects were verified (via console) to move
       through the correct waypoints and settle at the right rest position
 
+  **Correctness fix (2026-08-18 review):** the tip pick-up/drop-off z target
+  used `resource_point()`'s generic top-anchor on the `TipSpot`, but a
+  `TipSpot` is a zero-height placement marker (`size_z=0` by construction)
+  whose raw location is calibrated (per tip-rack `dz`) to land near the
+  tip's sharp point, not where a channel actually grabs it. Added
+  `tip_grab_point()`, mirroring `STARBackend.pick_up_tips`'s own
+  `end_tip_pick_up_process` math (`spot_z + tip.total_tip_length -
+  tip.fitting_depth`), and `channel_ops_event` now uses it for
+  pick_up_tips/drop_tips against a `TipSpot` specifically (drop-to-Trash
+  still uses the generic top-anchor). See `events.py`.
+
 ## Phase 4 — Polish
 
 Goal: pleasant to actually use day-to-day.
@@ -134,12 +151,33 @@ Goal: pleasant to actually use day-to-day.
 - [x] Basic reconnect handling: auto-retry every 1.5s on disconnect
 - [x] README pass: install/run instructions, how to plug `VisualizerBackend`
       into your own protocol script, brief architecture summary
+- [x] Replay: `VisualizerServer` records every broadcast event (in memory,
+      capped at `MAX_EVENT_HISTORY`) with a timestamp; a "Replay" button in
+      the HUD asks the server to re-send its whole history to just that
+      client, paced to approximate the original timing (capped per-gap at
+      `MAX_REPLAY_GAP` so a real multi-minute pause doesn't replay literally).
+      Solves "I opened the browser too late" and "let me watch that again"
+      without needing a full capture-to-file/scrubbing UI. **Caveat:**
+      in-memory only — restarting the Python process loses the history, so
+      this doesn't survive a script restart (see the stretch item below).
+
+  **Bug found and fixed while building this:** `ws.onopen`/`ws.onclose`
+  didn't check whether their socket was still the active one, so a stale
+  connection attempt's `onclose` firing after a newer connection's `onopen`
+  had already succeeded could re-disable the Replay button (and status
+  text) despite genuinely being connected. Both handlers now bail out early
+  if `ws !== currentWs`. Also deduped a cosmetic double scene-load on
+  replay (the explicitly-resent current scene, plus its own copy at the
+  head of history) — `replay()` now strips a leading run of `scene` events
+  from history after sending the current one explicitly.
 - [ ] Screenshots/GIF in README
 - [ ] Tag a v1 (holding off until this first pass is reviewed)
 
 ## Stretch / explicitly deferred (not v1)
 
-- [ ] Event capture-to-file + offline replay/scrubbing UI
+- [ ] Event capture-to-file (durable, survives a process restart) +
+      scrubbing/seek UI — in-memory replay from Phase 4 covers the common
+      "I missed it" / "watch that again" case within one run
 - [ ] 96-head visualization
 - [ ] iSWAP / CO-RE gripper + plate-move animation
 - [ ] Hamilton Vantage support

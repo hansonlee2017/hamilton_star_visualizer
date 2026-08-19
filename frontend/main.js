@@ -37,17 +37,11 @@ const DEFAULT_COLOR = 0x6b7280;
 
 // Deck and carrier resources declare a size_z that reflects their whole
 // envelope (for a deck, ~900mm can be the instrument housing; for a
-// carrier, ~130mm is the full rail height) -- not a slab you'd want drawn
-// solid, since it would visually bury shorter payloads (plates, tip racks)
-// that sit partway up that envelope on a holder. Draw these as a thin
-// platform sitting below their own origin instead.
-const THIN_ENVELOPE_CATEGORIES = new Set([
-  "deck",
-  "tip_carrier",
-  "plate_carrier",
-  "mfx_carrier",
-  "tube_carrier",
-]);
+// carrier, ~130mm is the full rail height, not the height of the carrier's
+// own structure) -- not a value you'd want to draw as a solid box directly.
+// The deck is drawn as a thin platform; carriers are drawn as a shaft from
+// their base up to their payload's holder -- see buildResourceObject().
+const CARRIER_CATEGORIES = new Set(["tip_carrier", "plate_carrier", "mfx_carrier", "tube_carrier"]);
 const ENVELOPE_PLATFORM_THICKNESS = 10;
 const TIP_PRESENT_COLOR = 0xe0b23d;
 const VOLUME_EMPTY_COLOR = new THREE.Color(0x2c4f46);
@@ -73,6 +67,13 @@ const statusTextEl = document.getElementById("status-text");
 const tooltipEl = document.getElementById("tooltip");
 const legendRowsEl = document.getElementById("legend-rows");
 const logListEl = document.getElementById("log-list");
+const replayBtn = document.getElementById("replay-btn");
+
+replayBtn.addEventListener("click", () => {
+  if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+  currentWs.send(JSON.stringify({ action: "replay" }));
+  logEvent("replay", "requested from server");
+});
 
 for (const [label, color] of LEGEND_ENTRIES) {
   const row = document.createElement("div");
@@ -192,10 +193,27 @@ function buildResourceObject(node, isRoot) {
     group.rotation.y = -THREE.MathUtils.degToRad(rotZ);
   }
 
-  const isEnvelope = THIN_ENVELOPE_CATEGORIES.has(node.category);
+  const isDeck = node.category === "deck";
+  const isCarrier = CARRIER_CATEGORIES.has(node.category);
+  const isEnvelope = isDeck || isCarrier;
   const sizeX = Math.max(node.size_x ?? 0, 0.1);
   const sizeY = Math.max(node.size_y ?? 0, 0.1);
-  const sizeZ = isEnvelope ? ENVELOPE_PLATFORM_THICKNESS : Math.max(node.size_z ?? 0.5, 0.1);
+  let sizeZ;
+  if (isDeck) {
+    sizeZ = ENVELOPE_PLATFORM_THICKNESS;
+  } else if (isCarrier) {
+    // A carrier's own size_z is its whole rail envelope, not a thickness --
+    // draw it as a solid shaft from its base up to where its payload
+    // (plate/tip-rack, via a PlateHolder/ResourceHolder child) actually
+    // sits, so the payload rests visibly on top instead of being buried
+    // inside (or floating disconnected above) the carrier's box.
+    const holderZs = (node.children ?? [])
+      .map((c) => c.location?.z ?? 0)
+      .filter((z) => z > 0);
+    sizeZ = holderZs.length > 0 ? Math.min(...holderZs) : ENVELOPE_PLATFORM_THICKNESS;
+  } else {
+    sizeZ = Math.max(node.size_z ?? 0.5, 0.1);
+  }
 
   let mesh = null;
   if ((node.size_x ?? 0) > 0 && (node.size_y ?? 0) > 0) {
@@ -207,10 +225,12 @@ function buildResourceObject(node, isRoot) {
       opacity: isEnvelope ? 0.85 : 1.0,
     });
     mesh = new THREE.Mesh(geometry, material);
-    // Envelope platforms sit *below* their own origin (z=0) rather than
-    // above it, so children positioned near z=0 -- e.g. a carrier's holder
-    // sites -- rest visually on top of the platform instead of inside it.
-    const zOffset = isEnvelope ? -sizeZ / 2 : sizeZ / 2;
+    // The deck platform sits *below* its own origin (z=0) rather than above
+    // it, so carriers resting at deck-level z=0 sit visibly on top of it
+    // instead of being embedded inside it. Carriers themselves use the
+    // normal above-origin placement, since their box now rises from their
+    // own base up to their payload (see sizeZ above).
+    const zOffset = isDeck ? -sizeZ / 2 : sizeZ / 2;
     mesh.position.set(sizeX / 2, zOffset, -sizeY / 2);
     mesh.userData = { resourceName: node.name, resourceType: node.type, category: node.category };
     group.add(mesh);
@@ -346,7 +366,9 @@ class Channel {
 
 let channels = [];
 function ensureChannels(numChannels) {
-  if (channels.length === numChannels) return;
+  // Always rebuilt (not just when the count changes) so a fresh "scene"
+  // message -- including the one that kicks off a replay -- also resets
+  // the gantry back to its rest pose, not just the deck/plates/tips.
   for (const ch of channels) gantryGroup.remove(ch.group);
   channels = Array.from({ length: numChannels }, (_, i) => new Channel(i));
 }
@@ -420,17 +442,25 @@ function handleOpEvent(msg) {
 // ---------------------------------------------------------------------------
 // WebSocket connection
 // ---------------------------------------------------------------------------
+let currentWs = null;
+
 function connect() {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
+  currentWs = ws;
 
   ws.onopen = () => {
+    if (ws !== currentWs) return; // stale socket superseded by a newer connect()
     statusEl.className = "connected";
     statusTextEl.textContent = "connected";
+    replayBtn.disabled = false;
   };
   ws.onclose = () => {
+    if (ws !== currentWs) return; // ditto -- don't let an old socket's close
+    // clobber state a newer, already-open connection just set
     statusEl.className = "disconnected";
     statusTextEl.textContent = "disconnected -- retrying...";
+    replayBtn.disabled = true;
     setTimeout(connect, 1500);
   };
   ws.onerror = () => ws.close();

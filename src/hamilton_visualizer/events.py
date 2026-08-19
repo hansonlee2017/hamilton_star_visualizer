@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 from pylabrobot.resources import Resource
+from pylabrobot.resources.tip import Tip
+from pylabrobot.resources.tip_rack import TipSpot
 
 
 def resource_point(resource: Resource) -> Dict[str, float]:
@@ -23,6 +25,30 @@ def resource_point(resource: Resource) -> Dict[str, float]:
 
   loc = resource.get_absolute_location(x="c", y="c", z="t")
   return {"x": round(loc.x, 2), "y": round(loc.y, 2), "z": round(loc.z, 2)}
+
+
+def tip_grab_point(tip_spot: TipSpot, tip: Tip) -> Dict[str, float]:
+  """Absolute (x, y, z) of where a channel actually grabs a tip seated at
+  ``tip_spot``, in deck mm.
+
+  ``TipSpot`` resources are zero-height placement markers (``size_z=0`` by
+  construction -- see ``pylabrobot.resources.tip_rack.TipSpot.__init__``):
+  their own bounding box has no "top", so ``resource_point()``'s top-anchor
+  is a no-op there and just returns the spot's raw location. That raw
+  location is *not* where a channel grabs the tip either -- each tip rack
+  factory places its spots via a ``dz`` offset that (empirically, from
+  PyLabRobot's own STAR backend math) lands close to the tip's sharp point,
+  well below the rack surface where the tip's mounting collar actually sits.
+
+  PyLabRobot's ``STARBackend.pick_up_tips`` computes the real seating depth
+  as ``spot_z + tip.total_tip_length - tip.fitting_depth`` (its
+  ``end_tip_pick_up_process``) -- this mirrors that formula so the
+  visualization's descend target matches where a channel would really stop.
+  """
+
+  loc = tip_spot.get_absolute_location(x="c", y="c", z="b")
+  z = loc.z + tip.total_tip_length - tip.fitting_depth
+  return {"x": round(loc.x, 2), "y": round(loc.y, 2), "z": round(z, 2)}
 
 
 def channel_ops_event(
@@ -38,14 +64,18 @@ def channel_ops_event(
 
   channels: List[Dict[str, Any]] = []
   for op, channel in zip(ops, use_channels):
-    entry: Dict[str, Any] = {
-      "channel": channel,
-      "resource": op.resource.name,
-      **resource_point(op.resource),
-    }
+    tip = getattr(op, "tip", None)
+    # pick_up_tips/drop_tips against a TipSpot (not e.g. a Trash) need the
+    # tip-length-aware grab point -- see tip_grab_point() -- everything else
+    # (aspirate/dispense wells, drop_tips into a Trash) uses the generic
+    # top-anchor approximation.
+    if op_name in ("pick_up_tips", "drop_tips") and tip is not None and isinstance(op.resource, TipSpot):
+      point = tip_grab_point(op.resource, tip)
+    else:
+      point = resource_point(op.resource)
+    entry: Dict[str, Any] = {"channel": channel, "resource": op.resource.name, **point}
     if volume_attr is not None:
       entry["volume"] = getattr(op, volume_attr)
-    tip = getattr(op, "tip", None)
     if tip is not None:
       entry["tip_type"] = type(tip).__name__
     channels.append(entry)

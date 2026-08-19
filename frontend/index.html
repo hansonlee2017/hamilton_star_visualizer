@@ -14,6 +14,9 @@
     #status .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; }
     #status.connected .dot { background: #35c46a; }
     #status.disconnected .dot { background: #d9534f; }
+    #replay-btn { pointer-events: auto; margin-left: 8px; background: rgba(20,22,26,0.85); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
+    #replay-btn:hover:not(:disabled) { background: rgba(40,44,50,0.9); }
+    #replay-btn:disabled { opacity: 0.5; cursor: default; }
 
     #tooltip { position: absolute; z-index: 10; pointer-events: none; background: rgba(20,22,26,0.92); border: 1px solid #3a3f47; padding: 6px 8px; border-radius: 6px; font-size: 12px; line-height: 1.4; display: none; max-width: 260px; }
     #tooltip .name { font-weight: 600; }
@@ -38,6 +41,7 @@
 
   <div id="hud">
     <div id="status" class="disconnected"><span class="dot"></span><span id="status-text">connecting...</span></div>
+    <button id="replay-btn" disabled title="Re-run everything this server has recorded so far, from the start">&#8635; Replay</button>
   </div>
 
   <div id="tooltip"></div>
