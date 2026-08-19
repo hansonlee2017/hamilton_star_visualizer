@@ -21,10 +21,11 @@ uv run python examples/demo_protocol.py
 ```
 
 Then open the printed URL (`http://127.0.0.1:8765` by default) in a browser.
-The demo waits 10 seconds after startup before it starts pipetting, so
-there's time to open the page. No PyLabRobot hardware is involved -- the demo
-runs against `LiquidHandlerChatterboxBackend`, which just prints what it's
-doing.
+The demo sets up the deck and waits -- check the initial deck/tip/liquid
+state looks right, then click **Start Protocol** in the top-left whenever
+you're ready; nothing runs before that. No PyLabRobot hardware is involved --
+the demo runs against `LiquidHandlerChatterboxBackend`, which just prints
+what it's doing.
 
 ## Using it in your own protocol
 
@@ -38,6 +39,11 @@ await server.start()  # prints the URL to open
 real_backend = STARBackend()  # or STARChatterboxBackend() for dry-run testing
 lh = LiquidHandler(backend=VisualizerBackend(real_backend, server), deck=deck)
 await lh.setup()
+
+# Optional but recommended: block until someone clicks "Start Protocol" in
+# the browser, instead of guessing how long setup/connecting will take.
+await server.wait_for_start()
+
 ... run your protocol as normal ...
 ```
 

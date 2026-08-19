@@ -93,12 +93,24 @@ const tooltipEl = document.getElementById("tooltip");
 const legendRowsEl = document.getElementById("legend-rows");
 const logListEl = document.getElementById("log-list");
 const replayBtn = document.getElementById("replay-btn");
+const startBtn = document.getElementById("start-btn");
 const speedSelect = document.getElementById("speed-select");
 
 replayBtn.addEventListener("click", () => {
   if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
   currentWs.send(JSON.stringify({ action: "replay" }));
   logEvent("replay", "requested from server");
+});
+
+startBtn.addEventListener("click", () => {
+  if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+  currentWs.send(JSON.stringify({ action: "start_protocol" }));
+  // Optimistically reflect it immediately; the server's own
+  // "start_status" broadcast (sent to every connected client, including
+  // this one) will confirm it a moment later regardless.
+  startBtn.disabled = true;
+  startBtn.classList.add("started");
+  logEvent("start", "protocol started");
 });
 
 // durationScale is declared with animateChannelOp() below (it's the thing
@@ -210,7 +222,7 @@ function colorForNode(node) {
   return CATEGORY_COLORS[node.category] ?? DEFAULT_COLOR;
 }
 
-function buildResourceObject(node, isRoot, parentSizeZ) {
+function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
   const group = new THREE.Group();
   group.name = node.name;
 
@@ -268,13 +280,25 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
     });
     mesh = new THREE.Mesh(geometry, material);
     // The deck platform sits *below* its own origin (z=0) rather than above
-    // it, so carriers resting at deck-level z=0 sit visibly on top of it
-    // instead of being embedded inside it. Carriers and thin categories
-    // both use the normal above-origin placement -- carriers because their
-    // box now rises from their own base up to their payload (see sizeZ
-    // above), thin categories because a shallow base at their own origin is
-    // exactly where their payload's holder/location math expects it.
-    const zOffset = isDeck ? -sizeZ / 2 : sizeZ / 2;
+    // it -- but its own z=0 is *not* the carrier rail surface (on a real
+    // STARLetDeck, carriers actually attach ~100mm up from there), so
+    // anchoring the platform's top at z=0 left it floating in open space
+    // ~100mm below every carrier instead of visibly supporting them.
+    // Anchor its top at the lowest point any child actually attaches
+    // instead -- same idea as the carrier shaft fix above, one level up.
+    let zOffset;
+    if (isDeck) {
+      const childZs = (node.children ?? []).map((c) => c.location?.z ?? 0).filter((z) => z > 0);
+      const deckSurfaceZ = childZs.length > 0 ? Math.min(...childZs) : 0;
+      zOffset = deckSurfaceZ - sizeZ / 2;
+    } else {
+      // Carriers and thin categories both use the normal above-origin
+      // placement -- carriers because their box now rises from their own
+      // base up to their payload (see sizeZ above), thin categories
+      // because a shallow base at their own origin is exactly where their
+      // payload's holder/location math expects it.
+      zOffset = sizeZ / 2;
+    }
     mesh.position.set(sizeX / 2, zOffset, -sizeY / 2);
     mesh.userData = { resourceName: node.name, resourceType: node.type, category: node.category };
     group.add(mesh);
@@ -293,16 +317,25 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
   // top surface, where a tip actually appears.
   let tipPyramid = null;
   if (node.category === "tip_spot") {
-    const geometry = new THREE.ConeGeometry(TIP_PYRAMID_RADIUS, TIP_PYRAMID_HEIGHT, 4);
-    // Always visible (present -> amber, empty -> black) rather than shown/
-    // hidden by tip presence -- an empty slot should still read as a slot,
-    // not disappear. Starts black; the first "state" event recolors it.
-    tipPyramid = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color: EMPTY_COLOR }));
+    // The rack (scene.py's `_rack_tip_length`) reports the real length of
+    // whatever tip model this rack holds; fall back to the arbitrary
+    // constant only if that lookup came back empty (e.g. a custom TipRack
+    // subclass scene.py's heuristic doesn't handle).
+    const tipHeight = parentTipLengthMm ?? TIP_PYRAMID_HEIGHT;
+    const geometry = new THREE.ConeGeometry(TIP_PYRAMID_RADIUS, tipHeight, 4);
+    // Always visible (present -> amber, empty -> black+translucent) rather
+    // than shown/hidden by tip presence -- an empty slot should still read
+    // as a slot, not disappear. Starts empty; the first "state" event (or
+    // embedded op-event data) sets the real color/opacity.
+    tipPyramid = new THREE.Mesh(
+      geometry,
+      new THREE.MeshLambertMaterial({ color: EMPTY_COLOR, transparent: true, opacity: EMPTY_OPACITY })
+    );
     const localZ = node.location?.z ?? 0;
     const rackTopInSpotLocalFrame = (parentSizeZ ?? 0) - localZ;
     tipPyramid.position.set(
       sizeX / 2,
-      rackTopInSpotLocalFrame - TIP_PYRAMID_HEIGHT / 2,
+      rackTopInSpotLocalFrame - tipHeight / 2,
       -sizeY / 2
     );
     // THREE.ConeGeometry's apex points toward +Y by default (an upright
@@ -329,8 +362,11 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
   // categories deliberately render shorter than their declared height, and
   // that shrink must not shift where a child thinks its parent's surface is.
   const declaredSizeZ = node.size_z ?? 0;
+  // A tip_rack node carries tip_length_mm (see scene.py); anything else
+  // just passes through whatever it received, in case of unexpected nesting.
+  const tipLengthMm = node.tip_length_mm ?? parentTipLengthMm;
   for (const child of node.children ?? []) {
-    const childObj = buildResourceObject(child, false, declaredSizeZ);
+    const childObj = buildResourceObject(child, false, declaredSizeZ, tipLengthMm);
     group.add(childObj);
   }
 
@@ -353,11 +389,14 @@ function loadScene(deckNode) {
 // ---------------------------------------------------------------------------
 
 // Shared with the op-event-embedded path below (applyEmbeddedResourceState)
-// so both ways a color can be driven -- the generic "state" broadcast (used
-// for the initial sync burst and for anything not covered by a gantry op)
-// and the timing-correct embedded data (used for live pick_up_tips/
-// drop_tips/aspirate/dispense) -- compute it identically.
-function volumeColor(volume, maxVolume) {
+// so both ways a color/opacity can be driven -- the generic "state"
+// broadcast (used for the initial sync burst and for anything not covered
+// by a gantry op) and the timing-correct embedded data (used for live
+// pick_up_tips/drop_tips/aspirate/dispense) -- compute them identically.
+const EMPTY_OPACITY = 0.5;
+const FULL_OPACITY = 1.0;
+
+function volumeVisual(volume, maxVolume) {
   const rawFrac = THREE.MathUtils.clamp((volume ?? 0) / (maxVolume || 1), 0, 1);
   // sqrt rather than the raw fraction: a linear scale makes small-but-real
   // volumes (e.g. a 50uL dispense into a 360uL well, 14%) look almost
@@ -365,7 +404,18 @@ function volumeColor(volume, maxVolume) {
   // dispense typically looks like right next to a well that's never been
   // touched. sqrt boosts the low end while keeping 0 at 0, 1 at 1, and the
   // ordering monotonic, so "more liquid" still always reads as "brighter."
-  return VOLUME_EMPTY_COLOR.clone().lerp(VOLUME_FULL_COLOR, Math.sqrt(rawFrac));
+  const frac = Math.sqrt(rawFrac);
+  return {
+    color: VOLUME_EMPTY_COLOR.clone().lerp(VOLUME_FULL_COLOR, frac),
+    opacity: THREE.MathUtils.lerp(EMPTY_OPACITY, FULL_OPACITY, frac),
+  };
+}
+
+function tipVisual(hasTip) {
+  return {
+    color: hasTip ? TIP_PRESENT_COLOR : EMPTY_COLOR,
+    opacity: hasTip ? FULL_OPACITY : EMPTY_OPACITY,
+  };
 }
 
 function applyState(resourceName, state) {
@@ -374,9 +424,15 @@ function applyState(resourceName, state) {
 
   if (Object.prototype.hasOwnProperty.call(state, "tip")) {
     const hasTip = state.tip !== null && state.tip !== undefined;
-    if (entry.tipPyramid) entry.tipPyramid.material.color.setHex(hasTip ? TIP_PRESENT_COLOR : EMPTY_COLOR);
+    if (entry.tipPyramid) {
+      const { color, opacity } = tipVisual(hasTip);
+      entry.tipPyramid.material.color.setHex(color);
+      entry.tipPyramid.material.opacity = opacity;
+    }
   } else if (Object.prototype.hasOwnProperty.call(state, "volume") && entry.mesh) {
-    entry.mesh.material.color.copy(volumeColor(state.volume, state.max_volume));
+    const { color, opacity } = volumeVisual(state.volume, state.max_volume);
+    entry.mesh.material.color.copy(color);
+    entry.mesh.material.opacity = opacity;
   }
 }
 
@@ -392,10 +448,14 @@ function applyEmbeddedResourceState(entry) {
   if (!target) return;
   if (Object.prototype.hasOwnProperty.call(entry, "resource_has_tip")) {
     if (target.tipPyramid) {
-      target.tipPyramid.material.color.setHex(entry.resource_has_tip ? TIP_PRESENT_COLOR : EMPTY_COLOR);
+      const { color, opacity } = tipVisual(entry.resource_has_tip);
+      target.tipPyramid.material.color.setHex(color);
+      target.tipPyramid.material.opacity = opacity;
     }
   } else if (Object.prototype.hasOwnProperty.call(entry, "resource_volume") && target.mesh) {
-    target.mesh.material.color.copy(volumeColor(entry.resource_volume, entry.resource_max_volume));
+    const { color, opacity } = volumeVisual(entry.resource_volume, entry.resource_max_volume);
+    target.mesh.material.color.copy(color);
+    target.mesh.material.opacity = opacity;
   }
 }
 
@@ -467,6 +527,12 @@ class Channel {
     this.tipMesh.rotation.y = Math.PI / 4;
     this.tipMesh.visible = false;
     this.group.add(this.tipMesh);
+    // Current effective tip length -- CHANNEL_TIP_HEIGHT until a real
+    // pick-up reports the actual tip's length via setTip(); also what
+    // animateChannelOp uses for body-clearance on every subsequent op this
+    // channel does with that tip (aspirate/dispense/drop), not just the
+    // pick-up itself.
+    this.tipLength = CHANNEL_TIP_HEIGHT;
 
     // Own clone so this channel's scroll offset can't fight another
     // channel's concurrent (and possibly opposite-direction) flowPulse().
@@ -481,10 +547,25 @@ class Channel {
     this.group.position.copy(p);
   }
 
-  setTip(visible) {
+  // `lengthMm`: the real length of the tip just picked up (from the
+  // pick_up_tips op event's tip_length_mm -- see events.py), so the glyph
+  // matches the actual tip instead of the CHANNEL_TIP_HEIGHT placeholder.
+  // Rebuilt (not just visually toggled) since it also feeds
+  // animateChannelOp's body-clearance math for every op this channel does
+  // until its next pick-up -- see `tipLength` below.
+  setTip(visible, lengthMm) {
     this.hasTip = visible;
     this.tipMesh.visible = visible;
     this.tipMesh.material.color.setHex(visible ? TIP_PRESENT_COLOR : EMPTY_COLOR);
+    if (visible) {
+      const length = lengthMm ?? CHANNEL_TIP_HEIGHT;
+      if (length !== this.tipLength) {
+        this.tipMesh.geometry.dispose();
+        this.tipMesh.geometry = new THREE.ConeGeometry(CHANNEL_TIP_RADIUS, length, 4);
+        this.tipMesh.position.y = -length / 2;
+        this.tipLength = length;
+      }
+    }
   }
 
   pulse() {
@@ -590,17 +671,23 @@ const RETRACT_MS = 350;
 let durationScale = 1;
 const scaled = (ms) => ms * durationScale;
 
-function animateChannelOp(entry, { onArrive } = {}) {
+// `tipLength`: override for the pick_up_tips case, where the tip that
+// matters for this op's clearance is the one about to be grabbed (from the
+// op event's tip_length_mm), not whatever this channel was last carrying --
+// see events.py's tip_length_mm comment. Every other op omits it and falls
+// back to the channel's own remembered `tipLength` (set by its last
+// pick-up), since it's still carrying that same tip throughout.
+function animateChannelOp(entry, { onArrive, tipLength } = {}) {
   const ch = channels[entry.channel];
   if (!ch) return;
   // `entry.z` (from the server) is where the *tip's point* should end up --
   // see events.py's tip_grab_point()/liquid_surface_point(). The channel
   // group's own origin is where the tip *meets the body*, above the tip's
-  // apex by the tip's own rendered length -- offsetting by CHANNEL_TIP_HEIGHT
-  // keeps the body clear of the target labware, so only the tip appears to
-  // enter it (see docs/PLAN.md for the "pipette entering the well" bug this
+  // apex by the tip's own real length -- offsetting by that length keeps
+  // the body clear of the target labware, so only the tip appears to enter
+  // it (see docs/PLAN.md for the "pipette entering the well" bug this
   // fixes).
-  const targetZ = entry.z + CHANNEL_TIP_HEIGHT;
+  const targetZ = entry.z + (tipLength ?? ch.tipLength);
   // x/y: null means "stay wherever this leg actually starts" -- see
   // enqueue()'s docstring for why that can't just be ch.pos.x/y here.
   ch.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
@@ -625,8 +712,9 @@ function handleOpEvent(msg) {
     case "pick_up_tips":
       for (const entry of msg.channels) {
         animateChannelOp(entry, {
+          tipLength: entry.tip_length_mm,
           onArrive: () => {
-            channels[entry.channel]?.setTip(true);
+            channels[entry.channel]?.setTip(true, entry.tip_length_mm);
             applyEmbeddedResourceState(entry);
           },
         });
@@ -692,6 +780,11 @@ function connect() {
     statusEl.className = "connected";
     statusTextEl.textContent = "connected";
     replayBtn.disabled = false;
+    // Whether to actually show this as clickable (vs. already-started) is
+    // settled a moment later by the "start_status" the server sends every
+    // new connection -- this just makes sure a *reconnect* doesn't leave it
+    // stuck disabled from the previous connection's onclose.
+    startBtn.disabled = false;
   };
   ws.onclose = () => {
     if (ws !== currentWs) return; // ditto -- don't let an old socket's close
@@ -699,6 +792,7 @@ function connect() {
     statusEl.className = "disconnected";
     statusTextEl.textContent = "disconnected -- retrying...";
     replayBtn.disabled = true;
+    startBtn.disabled = true;
     setTimeout(connect, 1500);
   };
   ws.onerror = () => ws.close();
@@ -714,6 +808,10 @@ function connect() {
       window.__lastStateMessages.push(msg);
     } else if (msg.type === "op") {
       handleOpEvent(msg);
+    } else if (msg.type === "start_status") {
+      startBtn.disabled = msg.started;
+      startBtn.classList.toggle("started", msg.started);
+      if (msg.started) logEvent("start", "protocol started");
     }
   };
 }

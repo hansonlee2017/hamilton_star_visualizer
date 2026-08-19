@@ -148,6 +148,12 @@ def channel_ops_event(
       entry["volume"] = getattr(op, volume_attr)
     if tip is not None:
       entry["tip_type"] = type(tip).__name__
+      # Real length of *this specific* tip -- lets the frontend size the
+      # channel's carried-tip glyph correctly (see main.js's
+      # Channel.setTip()) instead of an arbitrary constant, without needing
+      # a lookup: unlike the rack-resident case (scene.py's
+      # `_rack_tip_length`), we have the actual Tip object right here.
+      entry["tip_length_mm"] = tip.total_tip_length
 
     # Embed the resulting state directly, timed by the frontend's animation
     # (applied at "arrival," not on receipt) instead of relying on the

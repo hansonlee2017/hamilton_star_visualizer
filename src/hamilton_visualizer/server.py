@@ -79,6 +79,8 @@ class VisualizerServer:
     self._events: Deque[Tuple[float, Dict[str, Any]]] = deque(maxlen=MAX_EVENT_HISTORY)
     self._uv_server: Optional[uvicorn.Server] = None
     self._serve_task: Optional["asyncio.Task[None]"] = None
+    # Set when a browser clicks "Start Protocol" -- see wait_for_start().
+    self._start_event = asyncio.Event()
     self.app = self._build_app()
 
   def _build_app(self) -> FastAPI:
@@ -122,14 +124,19 @@ class VisualizerServer:
           )
         for state_event in self._latest_state.values():
           await self._send(websocket, state_event)
+        await self._send(websocket, {"type": "start_status", "started": self._start_event.is_set()})
         while True:
           raw = await websocket.receive_text()
           try:
             msg = json.loads(raw)
           except ValueError:
             continue
-          if msg.get("action") == "replay":
+          action = msg.get("action")
+          if action == "replay":
             await self.replay(websocket)
+          elif action == "start_protocol" and not self._start_event.is_set():
+            self._start_event.set()
+            await self.broadcast({"type": "start_status", "started": True})
       except WebSocketDisconnect:
         pass
       finally:
@@ -156,6 +163,20 @@ class VisualizerServer:
       self._uv_server.should_exit = True
     if self._serve_task is not None:
       await self._serve_task
+
+  async def wait_for_start(self) -> None:
+    """Block until a browser clicks "Start Protocol" (the HUD button sends
+    ``{"action": "start_protocol"}``).
+
+    Call this after setting up your deck/scene and before running your
+    actual protocol steps, instead of an arbitrary ``asyncio.sleep()`` --
+    it means you can take as long as you want opening the browser and
+    confirming the initial deck/tip/liquid state looks right, with no risk
+    of the protocol racing ahead and starting before you're connected (see
+    docs/PLAN.md's "Review round 7" for why that was worth fixing).
+    """
+
+    await self._start_event.wait()
 
   async def set_scene(self, scene: Dict[str, Any], *, num_channels: int) -> None:
     """Cache the deck scene graph and push it to every connected client.

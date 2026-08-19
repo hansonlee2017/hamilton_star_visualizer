@@ -64,9 +64,11 @@ async def main() -> None:
   for well in source_plate.children:
     well.set_volume(200)
 
-  # give the browser a moment to connect before the action starts
-  print("Waiting 10s for you to open the visualizer in a browser...")
-  await asyncio.sleep(10)
+  # Wait for you to open the visualizer, check the initial deck/tip/liquid
+  # state, and click "Start Protocol" -- no arbitrary timer to race against.
+  print("Open the visualizer, then click 'Start Protocol' when ready.")
+  await server.wait_for_start()
+  print("Started.")
 
   # -- a short, representative protocol: for each of the first 3 columns, ---
   # -- pick up 8 fresh tips, aspirate from the source plate, dispense to ----

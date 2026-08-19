@@ -466,6 +466,66 @@ them (originally phrased as "before the filling animation happens").
       well stuck showing its stale pre-run black); (3) after adding it, the
       same scenario showed every well/tip-spot's correct final color.
 
+## Review round 7 (2026-08-18)
+
+User feedback: needed an explicit "start" trigger instead of a fixed wait
+so there's no risk of connecting mid-run; a ~100mm gap between the deck
+platform and the carriers it's meant to support; tip pyramids should use
+the real tip length, not an arbitrary constant; empty wells/tip-spots
+should be semi-transparent.
+
+- [x] **Start button instead of a fixed sleep.** Added
+      `VisualizerServer.wait_for_start()` (blocks on an `asyncio.Event`)
+      and a `{"action": "start_protocol"}` websocket message that sets it
+      and broadcasts `{"type": "start_status", "started": true}` to every
+      connected client. `examples/demo_protocol.py` now calls
+      `await server.wait_for_start()` instead of `asyncio.sleep(10)`. A
+      green "Start Protocol" button in the HUD sends the action and hides
+      itself once `start_status` confirms it; a client connecting *after*
+      someone else already started sees it correctly pre-hidden (the
+      status is sent to every new connection, not just broadcast at the
+      moment it happens). This is also documented in the README as the
+      recommended pattern for real protocols, not just the demo.
+- [x] **~100mm gap between the deck platform and the carriers.** Same
+      family of bug as the carrier/tip_rack/plate fixes in earlier
+      rounds, just one level up: checked real coordinates and found deck
+      children (carriers, trash) attach at `location.z=100` relative to
+      the deck, not `0` -- the deck's own `size_z` origin is the
+      instrument's structural floor, not the carrier rail surface. The
+      platform was anchored at the deck's z=0, leaving it floating
+      ~100mm below every carrier. Fixed the same way the carrier shaft
+      height was: anchor the platform's *top* at the minimum child
+      `location.z` instead of at the deck's own origin. Verified live:
+      the deck mesh's world-space center now reads `y=95` (platform
+      top at 100, thickness 10mm) -- exactly the carriers' attachment
+      height.
+- [x] **Tip pyramid length.** Was a flat constant (16mm resting in the
+      rack, ~35mm carried by a channel) with no connection to the real
+      tip. Added `scene.py`'s `_rack_tip_length()`, which reads
+      `total_tip_length` from a rack's seated tip if any spot has one,
+      falling back to `TipSpot.make_tip()` (one harmless side effect: it
+      advances that spot's name counter by one) if the whole rack starts
+      empty, and embeds it as `tip_length_mm` on each `TipRack` scene
+      node. `main.js` threads it down to each spot's pyramid the same way
+      `parentSizeZ` already flows to it. For the *channel's* carried tip,
+      `events.py` embeds the real picked-up tip's `total_tip_length`
+      directly in the `pick_up_tips` op event (no lookup needed --
+      `op.tip` *is* the real tip), and `Channel.setTip()` rebuilds its
+      geometry to match, remembered as `tipLength` so every subsequent
+      op with that tip (aspirate/dispense/drop) uses the correct
+      body-clearance offset too, not just the pick-up itself. Verified
+      live: both the rack pyramid and the channel's carried-tip geometry
+      read exactly `95.1` (mm) for the demo's 1000µL filter tip.
+- [x] **50% opacity for empty wells/tip-spots.** `volumeVisual()`/
+      `tipVisual()` now return an opacity alongside the color -- 50% at
+      the empty end, ramping to 100% with fill (wells) or a flat 100%
+      when present (tip spots) -- shared by both places a color gets
+      applied (the generic "state" path and the timing-correct embedded
+      op-event path from round 6) so they can't drift apart. Had to also
+      add `transparent: true` to the tip pyramid's material, which
+      previously had no opacity support at all. Verified live: an empty
+      well reads `opacity: 0.5`, a tip spot with a tip reads `opacity: 1`.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
