@@ -737,6 +737,87 @@ dispense.
       artifacts (one sample landing exactly between two legs), not real
       simultaneous motion.
 
+## Review round 11 (2026-08-18)
+
+User feedback: after round 10's per-channel x -> y -> z fix, the motion
+still didn't look right. Then, once the real cause turned out to be a
+timing/architecture issue: "I would like the gantry move to be handled on
+the visualizer level ... rather than handled by the python script. I would
+like the python script to just simply say `await lh.dispense(<list_of_
+target_wells>, volumes...)`."
+
+- [x] **Diagnosed round 10's fix as incomplete, not wrong.** Round 10 made
+      each *individual* channel's own approach strictly x -> y -> z, and
+      that part was correct -- but `examples/cherry_pick_demo.py` still
+      drove `plan_gantry_passes()` from Python, issuing one real
+      `lh.dispense()`/`nudge_channel()` broadcast per gantry stop with a
+      fixed `asyncio.sleep()` in between to (try to) let one stop's
+      animation finish before the next stop's events went out. Recorded
+      all 8 channels' position every 15ms and classified which axis each
+      was moving on: even after widening the sleep from 0.3s to 2.1s
+      (well past the nominal ~1.6s animation), some fraction of samples
+      still showed *different* channels in *different* phases at the same
+      instant (e.g. one channel already descending to dispense while
+      another, from the *next* stop, was already moving in y) -- i.e. the
+      arm wasn't visibly moving together stop-by-stop. Root cause: guessing
+      a server-side sleep long enough to cover animation + websocket/
+      asyncio scheduling jitter is fundamentally unreliable, not just
+      under-tuned.
+- [x] **Moved gantry-pass planning from Python to the frontend.** Per the
+      user's explicit request, `hamilton_visualizer.gantry` (the round-9
+      module) and `VisualizerBackend.nudge_channel()` are deleted;
+      `examples/cherry_pick_demo.py` now does exactly one plain
+      `await lh.dispense(dest_wells, vols=[...])` for all 8 scattered
+      wells, identical in shape to every other `dispense()` call in this
+      repo. `frontend/main.js` gained `planGantryPasses()` (a direct port
+      of the deleted Python module's grouping/fallback logic) and
+      `resolveChannelYs()` (a port of `_resolve_ys`), operating on the
+      `x`/`y` values already embedded in the "op" event's channel entries
+      -- no new data needs to flow from the server at all. A channel's
+      *current* position (`Channel.pos.y`, continuously tracked by the
+      renderer already) stands in for the old `initial_y` parameter a
+      protocol script used to have to compute and pass in by hand.
+      `pick_up_tips`/`drop_tips`/`aspirate`/`dispense` in
+      `handleOpEvent()` now all route through this via a shared
+      `animateChannelGroupOp()` helper instead of each naively animating
+      every channel entry independently and assuming simultaneous
+      feasibility.
+
+      This isn't just moving the same logic to a different language: since
+      every pass's legs for *every* involved channel are now enqueued
+      synchronously, in order, onto each channel's own already-existing
+      FIFO queue (`Channel.enqueue()`, round 7) the moment the *one* real
+      op event arrives, there is no external timing/sleeping anywhere in
+      the whole path any more -- each channel's queue naturally plays its
+      own legs out in enqueued order, which is what actually guarantees
+      passes never overlap, instead of a guessed sleep duration that
+      merely made overlap less frequent.
+- [x] **Found and fixed a second, structural desync bug during
+      verification.** With the sleep removed, the same cross-channel
+      phase mismatch *still* showed up, at the same reproducible point.
+      Cause: an idle channel's nudge (`RISE + X + Y` = 750ms) takes
+      *less* total time than an active channel's full cycle (`RISE + X +
+      Y + DESCEND + HOLD + RETRACT` = 1600ms) for the same gantry stop --
+      so the idle channel's queue drains sooner and starts the *next*
+      stop's legs while an active channel from the *current* stop is
+      still mid-descend, even though both stops' legs were enqueued in
+      the correct order. Fixed by padding `nudgeChannel()` with a final
+      no-op wait (`DESCEND_MS + HOLD_MS + RETRACT_MS`) so every loaded
+      channel spends exactly the same total duration per stop whether
+      it's active or idle there, keeping every channel's queue advancing
+      through stops in lockstep.
+
+      Verified live: recorded all 8 channels' position every 15ms across
+      a full cherry-pick run (now driven by a single `lh.dispense()` call)
+      and classified which axis each channel was moving on at each
+      sample. Before the padding fix: 159 of 2821 samples showed more
+      than one distinct axis in motion across channels at the same
+      instant. After: 0 of 2680 samples did. The event log shows exactly
+      one `dispense` entry listing all 8 channels/wells, confirming the
+      Python side issued a single ordinary call; a screenshot shows the
+      same smiley face as before, now driven entirely by the visualizer's
+      own planning.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

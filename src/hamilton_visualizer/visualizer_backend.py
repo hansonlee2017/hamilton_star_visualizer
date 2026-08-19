@@ -281,24 +281,3 @@ class VisualizerBackend(LiquidHandlerBackend):
   async def move_channel_z(self, channel: int, z: float) -> None:
     await self._inner.move_channel_z(channel, z)
     await self._server.broadcast({"type": "op", "op": "move_channel", "channel": channel, "axis": "z", "value": z})
-
-  async def nudge_channel(
-    self, channel: int, *, x: Optional[float] = None, y: Optional[float] = None
-  ) -> None:
-    """Move a channel's on-screen position without issuing any command to
-    the wrapped backend at all -- deliberately skips ``self._inner``.
-
-    This exists for ``hamilton_visualizer.gantry.plan_gantry_passes()``:
-    when a scattered multi-column operation forces some channels out of
-    another channel's way, that's real Hamilton firmware doing its own
-    internal collision-avoidance motion planning as part of the *next*
-    real command, not something a protocol issues as its own explicit
-    step -- there's no PLR-level call for "get out of the way." (It's also
-    not the same thing as ``move_channel_x``/``move_channel_y`` above,
-    which *do* forward to a real instrument for genuine manual jogging --
-    ``LiquidHandlerChatterboxBackend`` doesn't even implement those, so a
-    hardware-free demo couldn't reach for them here regardless.) Broadcasts
-    the move directly so the visualizer stays accurate; omit whichever of
-    ``x``/``y`` shouldn't change.
-    """
-    await self._server.broadcast({"type": "op", "op": "nudge_channel", "channel": channel, "x": x, "y": y})
