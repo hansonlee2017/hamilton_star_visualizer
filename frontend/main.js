@@ -78,6 +78,18 @@ const VOLUME_EMPTY_COLOR = new THREE.Color(EMPTY_COLOR);
 const VOLUME_FULL_COLOR = new THREE.Color(0x2ee6a8);
 const PULSE_COLOR = new THREE.Color(0xffffff);
 
+// Hamilton deck rail geometry, from pylabrobot.resources.hamilton.
+// hamilton_decks: rails_to_location(rail) = Coordinate(x=100.0 + (rail-1)
+// * 22.5, ...). `num_rails` itself *is* already part of a deck node's own
+// serialize() output (it's a real dataclass field, not scene.py-injected),
+// but the 100.0/22.5 constants aren't resource attributes anywhere -- they
+// only exist as that method's arithmetic -- so they're hardcoded here the
+// same way CHANNEL_PITCH_MM is, rather than threading two numbers that
+// never change per PyLabRobot's own source through scene.py for this.
+const RAIL_X_OFFSET_MM = 100.0;
+const RAIL_WIDTH_MM = 22.5;
+const RAIL_LABEL_INTERVAL = 5;
+
 const LEGEND_ENTRIES = [
   ["Carrier", 0x5a6270],
   ["Tip rack", 0x3d6fa8],
@@ -227,6 +239,88 @@ function colorForNode(node) {
   return CATEGORY_COLORS[node.category] ?? DEFAULT_COLOR;
 }
 
+// A Well's real shape -- PyLabRobot already reports it (`bottom_type`:
+// "flat"/"U"/"V"/"unknown", `cross_section_type`: "circle"/"rectangle",
+// both present straight from Resource.serialize(), no scene.py changes
+// needed) -- so its footprint shouldn't always render as the flat-topped
+// box every other category uses. Built as a *unit* shape (radius/size 0.5,
+// height 1) and non-uniformly scaled to the well's real size_x/size_z/
+// size_y by the caller, so one geometry works for both circular and
+// rectangular footprints without special-casing which.
+//
+//  - V-bottom (e.g. a PCR plate): an inverted cone -- liquid actually
+//    collects at a point, and that's the plate's whole visual identity.
+//  - Round (circular cross-section, any other bottom): a cylinder --
+//    still reads as "round" even though a real U-bottom well's floor
+//    curves rather than staying flat; approximating that curve isn't
+//    worth a fourth geometry type for a shape difference this subtle at
+//    well scale.
+//  - Rectangular cross-section, non-V bottom: unchanged -- the existing
+//    box (returns null; caller falls back to it).
+function wellShapeFor(node) {
+  if (node.category !== "well") return null;
+  if (node.bottom_type === "V") {
+    // Apex-down like the tip pyramid's cone -- THREE.ConeGeometry's apex
+    // points +Y by default, so flip it in buildResourceObject the same
+    // way (rotation.x = Math.PI).
+    return { geometry: new THREE.ConeGeometry(0.5, 1, 24), invert: true };
+  }
+  if (node.cross_section_type === "circle") {
+    return { geometry: new THREE.CylinderGeometry(0.5, 0.5, 1, 24), invert: false };
+  }
+  return null;
+}
+
+// Small text-on-a-canvas billboard, same "draw once on a 2D canvas, use as
+// a texture" approach as createFlowTexture() below -- no font-loading or
+// text-geometry library needed for a handful of short numeric labels.
+// Always faces the camera (THREE.Sprite), which is exactly what a ruler
+// tick label wants regardless of orbit angle.
+function createTextSprite(text, { fontSize = 64, color = "#c7ccd4" } = {}) {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  const width = Math.ceil(ctx.measureText(text).width) + 16;
+  const height = fontSize + 16;
+  canvas.width = width;
+  canvas.height = height;
+  // Resizing the canvas resets its 2D context state, so the font has to be
+  // set again before the actual fillText below.
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, width / 2, height / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true })
+  );
+  // Fixed real-world height regardless of text length; width follows the
+  // canvas's own aspect ratio so digits don't stretch.
+  const worldHeight = 14;
+  sprite.scale.set((width / height) * worldHeight, worldHeight, 1);
+  return sprite;
+}
+
+// Every RAIL_LABEL_INTERVAL-th rail number along the deck's front edge --
+// see the RAIL_X_OFFSET_MM/RAIL_WIDTH_MM comment above for where the
+// coordinate formula comes from. Placed just in front of (smaller real-world
+// y than) where carriers actually attach and at deck-surface height, so
+// labels read like ruler markings instead of overlapping any carrier sitting
+// on the rail.
+function addRailLabels(parentGroup, node, deckSurfaceZ) {
+  const numRails = node.num_rails;
+  if (!numRails) return; // non-Hamilton or otherwise rail-less deck
+  for (let rail = RAIL_LABEL_INTERVAL; rail <= numRails; rail += RAIL_LABEL_INTERVAL) {
+    const x = RAIL_X_OFFSET_MM + (rail - 1) * RAIL_WIDTH_MM;
+    const sprite = createTextSprite(String(rail));
+    sprite.position.copy(mapPoint(x, -15, deckSurfaceZ + 2));
+    parentGroup.add(sprite);
+  }
+}
+
 function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
   const group = new THREE.Group();
   group.name = node.name;
@@ -246,6 +340,15 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
   const isCarrier = CARRIER_CATEGORIES.has(node.category);
   const isThin = THIN_CATEGORIES.has(node.category);
   const isEnvelope = isDeck || isCarrier || isThin;
+  // Shared by the platform's own zOffset below and by the rail labels --
+  // both need "where do carriers actually attach," not the deck's own z=0
+  // (see the zOffset comment further down for why those differ).
+  const deckSurfaceZ = isDeck
+    ? (() => {
+        const childZs = (node.children ?? []).map((c) => c.location?.z ?? 0).filter((z) => z > 0);
+        return childZs.length > 0 ? Math.min(...childZs) : 0;
+      })()
+    : null;
   const sizeX = Math.max(node.size_x ?? 0, 0.1);
   const sizeY = Math.max(node.size_y ?? 0, 0.1);
   let sizeZ;
@@ -276,7 +379,8 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
 
   let mesh = null;
   if ((node.size_x ?? 0) > 0 && (node.size_y ?? 0) > 0) {
-    const geometry = new THREE.BoxGeometry(sizeX, sizeZ, sizeY);
+    const wellShape = wellShapeFor(node);
+    const geometry = wellShape ? wellShape.geometry : new THREE.BoxGeometry(sizeX, sizeZ, sizeY);
     const color = colorForNode(node);
     const material = new THREE.MeshLambertMaterial({
       color,
@@ -284,6 +388,14 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
       opacity: isEnvelope ? 0.85 : 1.0,
     });
     mesh = new THREE.Mesh(geometry, material);
+    if (wellShape) {
+      // Unit geometry -- see wellShapeFor()'s docstring -- scaled to this
+      // well's real footprint/height. Scale (not baked-in geometry size)
+      // so the same two geometries are reused across every well instead
+      // of allocating one per well.
+      mesh.scale.set(sizeX, sizeZ, sizeY);
+      if (wellShape.invert) mesh.rotation.x = Math.PI;
+    }
     // The deck platform sits *below* its own origin (z=0) rather than above
     // it -- but its own z=0 is *not* the carrier rail surface (on a real
     // STARLetDeck, carriers actually attach ~100mm up from there), so
@@ -293,8 +405,6 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
     // instead -- same idea as the carrier shaft fix above, one level up.
     let zOffset;
     if (isDeck) {
-      const childZs = (node.children ?? []).map((c) => c.location?.z ?? 0).filter((z) => z > 0);
-      const deckSurfaceZ = childZs.length > 0 ? Math.min(...childZs) : 0;
       zOffset = deckSurfaceZ - sizeZ / 2;
     } else if (isThin) {
       // A thin category's own *placement* on its parent can itself be
@@ -324,6 +434,8 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
     group.add(mesh);
     hoverables.push(mesh);
   }
+
+  if (isDeck) addRailLabels(group, node, deckSurfaceZ);
 
   // A tip spot's own box is a near-zero-height placement marker (see
   // events.py's tip_grab_point() docstring for why), and -- easy to miss --
@@ -374,6 +486,13 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
     node,
     baseColor: mesh ? mesh.material.color.clone() : null,
     tipPyramid,
+    // Live volume, kept in sync by applyState()/applyEmbeddedResourceState()
+    // below -- purely for the hover tooltip (see "Hover tooltips" section);
+    // the mesh's own color/opacity is the actual visual state. maxVolume
+    // seeded from the node's own declared capacity so the tooltip has
+    // something sensible to show even before any "state" message arrives.
+    volume: null,
+    maxVolume: node.max_volume ?? null,
   });
 
   // Children's own layout math (e.g. the tip-spot pyramid's "where's the
@@ -453,6 +572,8 @@ function applyState(resourceName, state) {
     const { color, opacity } = volumeVisual(state.volume, state.max_volume);
     entry.mesh.material.color.copy(color);
     entry.mesh.material.opacity = opacity;
+    entry.volume = state.volume;
+    if (state.max_volume != null) entry.maxVolume = state.max_volume;
   }
 }
 
@@ -476,6 +597,8 @@ function applyEmbeddedResourceState(entry) {
     const { color, opacity } = volumeVisual(entry.resource_volume, entry.resource_max_volume);
     target.mesh.material.color.copy(color);
     target.mesh.material.opacity = opacity;
+    target.volume = entry.resource_volume;
+    if (entry.resource_max_volume != null) target.maxVolume = entry.resource_max_volume;
   }
 }
 
@@ -1055,9 +1178,22 @@ renderer.domElement.addEventListener("pointermove", (event) => {
     tooltipEl.style.display = "block";
     tooltipEl.style.left = `${event.clientX + 14}px`;
     tooltipEl.style.top = `${event.clientY + 14}px`;
+    // Volume line only for wells, and only once we actually know a value
+    // (entry.volume starts null until the first "state" -- see
+    // resourceIndex.set()'s comment -- so an unstarted protocol just omits
+    // the line rather than claiming 0uL).
+    let volumeLine = "";
+    if (category === "well") {
+      const entry = resourceIndex.get(resourceName);
+      if (entry && entry.volume != null) {
+        const max = entry.maxVolume != null ? ` / ${entry.maxVolume}` : "";
+        volumeLine = `<div class="volume">${entry.volume.toFixed(1)}${max} &micro;L</div>`;
+      }
+    }
     tooltipEl.innerHTML =
       `<div class="name">${resourceName}</div>` +
-      `<div class="type">${resourceType}${category ? " &middot; " + category : ""}</div>`;
+      `<div class="type">${resourceType}${category ? " &middot; " + category : ""}</div>` +
+      volumeLine;
   } else {
     tooltipEl.style.display = "none";
   }

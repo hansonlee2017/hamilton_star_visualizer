@@ -818,6 +818,72 @@ target_wells>, volumes...)`."
       same smiley face as before, now driven entirely by the visualizer's
       own planning.
 
+## Review round 12 (2026-08-19)
+
+User feature requests: render wells by their real shape (round -> cylinder,
+V-bottom like a PCR plate -> inverted cone, square -> unchanged box); label
+the deck's rails every 5 (5, 10, 15, ...); show a well's volume on hover.
+
+- [x] **Shape-aware well rendering.** PyLabRobot's own `Resource.
+      serialize()` already reports a Well's `bottom_type` ("flat"/"U"/"V"/
+      "unknown") and `cross_section_type` ("circle"/"rectangle") -- real
+      dataclass fields, not something scene.py had to add -- so this
+      needed zero backend changes. Added `wellShapeFor()`: V-bottom wells
+      get an inverted `ConeGeometry` (apex down, same rotation trick as
+      the tip pyramid), circular-cross-section wells get a
+      `CylinderGeometry`, everything else keeps the existing `BoxGeometry`.
+      Both new geometries are built once as a *unit* shape (radius/size
+      0.5, height 1) and non-uniformly scaled per instance
+      (`mesh.scale.set(sizeX, sizeZ, sizeY)`) to the well's real
+      footprint, so one geometry is reused across every well of a plate
+      instead of allocating a differently-sized one per well.
+
+      Verified live: `cor_96_wellplate_360uL_Fb` (flat bottom, circular)
+      now reports `CylinderGeometry` correctly scaled to `(6.86, 10.67,
+      6.86)`, and a screenshot shows visibly round wells instead of
+      cubes. A real V-bottom plate
+      (`Azenta4titudeFrameStar_96_wellplate_200ul_Vb`) reports
+      `ConeGeometry` with `rotation.x = π` (apex down); a screenshot
+      shows the wells reading as small points/spikes rather than flat
+      tops.
+- [x] **Rail number labels, every 5.** `num_rails` is already part of a
+      deck node's own `serialize()` output (a real field on
+      `HamiltonDeck`, no injection needed); the rail-to-x formula (`x =
+      100.0 + (rail - 1) * 22.5`) only exists as arithmetic inside
+      PyLabRobot's `rails_to_location()`, so those two constants are
+      hardcoded on the frontend (`RAIL_X_OFFSET_MM`/`RAIL_WIDTH_MM`) the
+      same way `CHANNEL_PITCH_MM` already is, rather than threading two
+      numbers that never change through scene.py. Added
+      `createTextSprite()` (same "draw text on a canvas, use it as a
+      texture" approach `createFlowTexture()` already uses -- no font-
+      loading library needed) and `addRailLabels()`, placing a billboard
+      sprite reading "5", "10", ... at each fifth rail's x, just in front
+      of (smaller y than) where carriers actually attach, at deck-surface
+      height, so they read like ruler markings instead of overlapping any
+      carrier sitting on the rail.
+
+      Verified live: a screenshot of the STARLet deck (32 rails) shows
+      "5", "10", "15", "20", "25", "30" running along the front edge in a
+      clean line matching the isometric perspective.
+- [x] **Volume on hover.** The hover tooltip (round 1) only ever showed a
+      resource's static name/type -- nothing tracked a well's *live*
+      volume anywhere retrievable later; `applyState()`/
+      `applyEmbeddedResourceState()` only ever wrote it straight into the
+      mesh's color/opacity. Added `volume`/`maxVolume` fields to each
+      resourceIndex entry (seeded from the node's own declared
+      `max_volume`, updated by both of those functions alongside the
+      color/opacity they already set) and a volume line in the tooltip,
+      shown only for `category === "well"` and only once a real value has
+      arrived (`entry.volume` starts `null`, so an unstarted protocol
+      doesn't claim every well is at 0uL).
+
+      Verified live: seeded a well's tracked volume, synthesized a
+      pointermove at its exact projected screen position (via
+      `camera.project()` on its mesh's world position) to trigger the
+      real hover handler, and confirmed the tooltip's rendered HTML reads
+      "123.4 / 360 µL" under the resource name/type, styled in the same
+      green used for the well legend swatch.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
