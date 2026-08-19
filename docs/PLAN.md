@@ -1169,6 +1169,46 @@ PicoGreen reagent before the smaller sample/standard volume; and drop the
       target) at 195uL, `dna_stock`/`te_diluent` drawn down to 300uL each,
       and `picogreen_reservoir` drawn down to 3760uL.
 
+## Review round 18 (2026-08-19)
+
+Three smaller fixes: round volume displays to 1 decimal place; make
+troughs and tubes show their volume on hover too, not just wells; and a
+report that the multichannel pipettes' Y order looks reversed at their
+starting position.
+
+- [x] **Volume rounding.** The hover tooltip's volume line already rounded
+      the live volume to 1 decimal (`entry.volume.toFixed(1)`) but not the
+      max-volume half of the fraction, which can come straight out of
+      PyLabRobot as a long float -- e.g. `azenta_96_wellplate_200uL_Vb_
+      4titudeframestar`'s real declared capacity is `203.52938905975373`,
+      not a round 200 or 203.5. Added `.toFixed(1)` there too.
+- [x] **Trough/tube volume on hover.** The tooltip's volume line was gated
+      on `category === "well"` only; troughs and tubes already had live
+      `entry.volume`/`entry.maxVolume` tracking (round 15's `volumeVisual()`
+      fill-level coloring was already category-agnostic, "Container-shaped
+      'has a volume' state" per its own comment) -- the tooltip just never
+      surfaced it. Broadened the check to `well`/`trough`/`tube`.
+- [x] **Reversed channel Y order at rest, confirmed and fixed.** `Channel`'s
+      constructor set `pos.y = index * CHANNEL_Y_SPACING` -- channel 0 at
+      the lowest (most "front", -y) offset, channel 7 at the highest (most
+      "back", +y). Real Hamilton/PyLabRobot channel numbering runs the
+      other way: an 8-channel `drop_tips`' own per-channel trash offsets
+      (already visible in every prior round's event log/server output)
+      report `+31.5, +22.5, ..., -31.5` for channels 0-7, i.e. channel 0 is
+      the back-most channel and increasing index moves toward the front.
+      The parked/rest row was mirrored front-to-back relative to that.
+      Fixed by negating: `pos.y = -index * CHANNEL_Y_SPACING`.
+
+      Verified live: hovering `sample_plate_well_A1` (well) now reads
+      "50.0 / 203.5 &micro;L" instead of the raw unrounded float;
+      hovering `picogreen_reservoir` (trough) and `te_diluent` (tube) now
+      show "10000.0 / 60000.0 &micro;L" and "300.0 / 1500.0 &micro;L"
+      respectively, where before they showed no volume line at all.
+      Queried the parked channels' world positions directly after a fresh
+      scene load: channel 0 sits at the highest (most "back") Y and
+      channel 7 at the lowest (most "front"), matching the real per-
+      channel trash-offset convention instead of the old mirrored order.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

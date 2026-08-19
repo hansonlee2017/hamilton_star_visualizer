@@ -735,7 +735,14 @@ const FLOW_PULSE_MS = 550;
 class Channel {
   constructor(index) {
     this.index = index;
-    this.pos = { x: 0, y: index * CHANNEL_Y_SPACING, z: restZ };
+    // Negative: on a real Hamilton (and in PLR's own per-channel offsets --
+    // e.g. an 8-channel drop_tips reports trash offsets +31.5, +22.5, ...,
+    // -31.5 for channels 0-7, 9mm apart), channel 0 is the back-most
+    // channel and increasing index moves toward the front (-y, PLR's "back"
+    // axis -- see the coordinate-mapping comment up top). A plain `+index *
+    // CHANNEL_Y_SPACING` here put channel 0 at the front and channel 7 at
+    // the back instead -- the whole rest row was mirrored front-to-back.
+    this.pos = { x: 0, y: -index * CHANNEL_Y_SPACING, z: restZ };
     this.hasTip = false;
     this.queue = [];
     this.current = null;
@@ -1320,15 +1327,19 @@ renderer.domElement.addEventListener("pointermove", (event) => {
     // ("Plate", "TipCarrier"); this is the specific catalog part number a
     // protocol author would actually recognize.
     const modelLine = model ? `<div class="model">${model}</div>` : "";
-    // Volume line only for wells, and only once we actually know a value
-    // (entry.volume starts null until the first "state" -- see
-    // resourceIndex.set()'s comment -- so an unstarted protocol just omits
-    // the line rather than claiming 0uL).
+    // Volume line for any liquid container -- well, trough, or tube -- and
+    // only once we actually know a value (entry.volume starts null until
+    // the first "state" -- see resourceIndex.set()'s comment -- so an
+    // unstarted protocol just omits the line rather than claiming 0uL).
     let volumeLine = "";
-    if (category === "well") {
+    if (category === "well" || category === "trough" || category === "tube") {
       const entry = resourceIndex.get(resourceName);
       if (entry && entry.volume != null) {
-        const max = entry.maxVolume != null ? ` / ${entry.maxVolume}` : "";
+        // 1 decimal place on both sides -- a resource's real max_volume
+        // (e.g. a tube carrier insert's declared capacity) can come out of
+        // PyLabRobot as a long float (e.g. 203.52938905975373), not just
+        // the live volume, so both need rounding here.
+        const max = entry.maxVolume != null ? ` / ${entry.maxVolume.toFixed(1)}` : "";
         volumeLine = `<div class="volume">${entry.volume.toFixed(1)}${max} &micro;L</div>`;
       }
     }
