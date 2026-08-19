@@ -303,6 +303,72 @@ for a slower playback option to review animations more closely.
       every keyframe/pulse/flow duration in `main.js`. Applies to live
       viewing and replay alike, and can be changed mid-run.
 
+## Review round 4 (2026-08-18)
+
+User feedback after round 3: the channel always detours near
+`trash_core96` between operations instead of just rising straight up; tip
+spots overlapping/hidden inside the tip rack; wells and their fill level
+not visible, likely the same clipping issue, with a suggestion to raise
+wells/tip-spots in z and use black for empty ones.
+
+- [x] **Detour near `trash_core96`.** Root cause, found by tracing
+      `trash_core96`'s real coordinates (x≈3, essentially the deck origin)
+      against the channel's constructor default (`x: 0`): the RISE leg's
+      target x/y was `ch.pos.x/y` read **at the moment the op event
+      arrived** (`animateChannelOp`'s enqueue call), not when the leg
+      actually starts executing. Since events routinely arrive faster than
+      their ~1.6s animation plays out, the per-channel queue backs up, so
+      that snapshot is frequently stale -- often still showing the
+      channel's *initial* (x=0) position from before it had moved at all,
+      because no waypoint had executed yet by the time later events'
+      RISE legs were enqueued. x=0 happens to sit almost exactly on
+      `trash_core96`, which is never actually part of this demo's
+      protocol -- explaining the "always detours there" pattern precisely.
+      Fixed properly rather than patched around: `Channel.enqueue()` now
+      accepts `x`/`y` of `null`, meaning "resolve to wherever this leg
+      actually starts from" -- resolved lazily inside `update()`, right
+      when the leg begins, using the channel's real position at that
+      instant. `animateChannelOp`'s RISE leg now passes `{x: null, y:
+      null, z: restZ}`, exactly matching the user's ask ("just go to safe
+      z-height while maintaining the same x-y"). Verified live: sampled a
+      channel's world x 1000 times over ~15s of replay -- zero samples
+      landed near trash_core96's x (0 of 1001, vs. frequent hits before
+      the fix).
+- [x] **Tip spots hidden inside the rack / wells hidden inside plates.**
+      Same root pattern as the carrier fix two rounds back, just not yet
+      applied to these two categories: `tip_rack`'s declared `size_z`
+      (20mm) and `plate`'s (14.2mm) were both rendered as a *solid* box
+      the full declared height, but a `TipSpot`'s tip and a `Well`'s
+      liquid sit recessed *inside* that height (a well starts 3mm up from
+      a 14.2mm-tall plate's own base, comfortably inside it) -- so the
+      solid parent box entirely buried them. Added `tip_rack`/`plate` to
+      the same thin-slab treatment carriers already got
+      (`THIN_CATEGORIES`), rendered at a fixed `THIN_CATEGORY_THICKNESS`
+      (3mm) instead of their full declared height.
+
+      This surfaced a real design bug in the *carrier* fix while
+      implementing it: `buildResourceObject` was passing its own
+      (possibly-thinned) rendered `sizeZ` down to children as
+      `parentSizeZ`, conflating "how tall to draw this box" with "what
+      height should children's layout math treat as the real surface."
+      For carriers those happened to coincide by construction, but thinning
+      tip_rack/plate the same way would have also shifted where their
+      children think the real surface is, undoing the fix. Now always
+      passes the *declared* `node.size_z` down (`declaredSizeZ`),
+      independent of whatever thickness this node is actually rendered at.
+- [x] **Black for empty tip spots/wells.** Tip spot pyramids are now
+      *always* rendered (previously hidden via `visible=false` when
+      empty) -- amber when present, black (`EMPTY_COLOR`) when not, so an
+      empty slot still reads as a slot rather than disappearing.
+      `VOLUME_EMPTY_COLOR` (the 0% end of a well's fill-level gradient) is
+      now the same black instead of a dark teal.
+
+      Verified live via material color lookups: a touched-then-discarded
+      tip spot reads pure black (`000000`); an untouched one reads amber
+      (`e0b23d`); a partially-drained well (150/360µL) and an
+      untouched-but-prefilled one (200/360µL) both read distinct shades of
+      green between black and full, proportional to fill.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

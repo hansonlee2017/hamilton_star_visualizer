@@ -43,8 +43,18 @@ const DEFAULT_COLOR = 0x6b7280;
 // their base up to their payload's holder -- see buildResourceObject().
 const CARRIER_CATEGORIES = new Set(["tip_carrier", "plate_carrier", "mfx_carrier", "tube_carrier"]);
 const ENVELOPE_PLATFORM_THICKNESS = 10;
+// tip_rack and plate have the same "declared size_z is bigger than the
+// visible surface" problem as carriers -- their actual payload (a TipSpot's
+// tip, a Well's liquid) sits recessed *inside* that declared height, so a
+// solid box the full height buries it. Rendered the same way as carriers:
+// a thin slab, not the full block.
+const THIN_CATEGORIES = new Set(["tip_rack", "plate"]);
+const THIN_CATEGORY_THICKNESS = 3;
 const TIP_PRESENT_COLOR = 0xe0b23d;
-const TIP_EMPTY_COLOR = 0x555a62;
+// Empty tip spots/wells are always rendered (not hidden) so a slot reads
+// as "empty" rather than "missing" -- black distinguishes that at a glance
+// from an occupied one, per user feedback.
+const EMPTY_COLOR = 0x000000;
 // A tip's real length (~95mm for a 1000uL Hamilton tip) is much larger than
 // the ~9mm spacing between rack positions -- drawn to true scale, adjacent
 // tips would overlap. These are a visually-legible compromise, not to
@@ -59,7 +69,7 @@ const TIP_PYRAMID_HEIGHT = 16;
 // never visually touch.
 const CHANNEL_TIP_RADIUS = TIP_PYRAMID_RADIUS * 1.3;
 const CHANNEL_TIP_HEIGHT = TIP_PYRAMID_HEIGHT * 2.2;
-const VOLUME_EMPTY_COLOR = new THREE.Color(0x2c4f46);
+const VOLUME_EMPTY_COLOR = new THREE.Color(EMPTY_COLOR);
 const VOLUME_FULL_COLOR = new THREE.Color(0x2ee6a8);
 const PULSE_COLOR = new THREE.Color(0xffffff);
 
@@ -217,7 +227,8 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
 
   const isDeck = node.category === "deck";
   const isCarrier = CARRIER_CATEGORIES.has(node.category);
-  const isEnvelope = isDeck || isCarrier;
+  const isThin = THIN_CATEGORIES.has(node.category);
+  const isEnvelope = isDeck || isCarrier || isThin;
   const sizeX = Math.max(node.size_x ?? 0, 0.1);
   const sizeY = Math.max(node.size_y ?? 0, 0.1);
   let sizeZ;
@@ -233,6 +244,15 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
       .map((c) => c.location?.z ?? 0)
       .filter((z) => z > 0);
     sizeZ = holderZs.length > 0 ? Math.min(...holderZs) : ENVELOPE_PLATFORM_THICKNESS;
+  } else if (isThin) {
+    // tip_rack/plate have the same problem as carriers: a TipSpot's tip and
+    // a Well's liquid sit recessed *inside* the parent's declared size_z
+    // (e.g. a well is 3-14mm up from a 14mm-tall plate's own base) -- a
+    // solid box the full declared height buries them entirely. Render just
+    // a thin base instead; the payload (rendered using the *declared*
+    // height via parentSizeZ passed to children below, not this thinned
+    // value) then sits visibly clear of it.
+    sizeZ = THIN_CATEGORY_THICKNESS;
   } else {
     sizeZ = Math.max(node.size_z ?? 0.5, 0.1);
   }
@@ -249,9 +269,11 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
     mesh = new THREE.Mesh(geometry, material);
     // The deck platform sits *below* its own origin (z=0) rather than above
     // it, so carriers resting at deck-level z=0 sit visibly on top of it
-    // instead of being embedded inside it. Carriers themselves use the
-    // normal above-origin placement, since their box now rises from their
-    // own base up to their payload (see sizeZ above).
+    // instead of being embedded inside it. Carriers and thin categories
+    // both use the normal above-origin placement -- carriers because their
+    // box now rises from their own base up to their payload (see sizeZ
+    // above), thin categories because a shallow base at their own origin is
+    // exactly where their payload's holder/location math expects it.
     const zOffset = isDeck ? -sizeZ / 2 : sizeZ / 2;
     mesh.position.set(sizeX / 2, zOffset, -sizeY / 2);
     mesh.userData = { resourceName: node.name, resourceType: node.type, category: node.category };
@@ -272,7 +294,10 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
   let tipPyramid = null;
   if (node.category === "tip_spot") {
     const geometry = new THREE.ConeGeometry(TIP_PYRAMID_RADIUS, TIP_PYRAMID_HEIGHT, 4);
-    tipPyramid = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color: TIP_PRESENT_COLOR }));
+    // Always visible (present -> amber, empty -> black) rather than shown/
+    // hidden by tip presence -- an empty slot should still read as a slot,
+    // not disappear. Starts black; the first "state" event recolors it.
+    tipPyramid = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color: EMPTY_COLOR }));
     const localZ = node.location?.z ?? 0;
     const rackTopInSpotLocalFrame = (parentSizeZ ?? 0) - localZ;
     tipPyramid.position.set(
@@ -285,7 +310,6 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
     // like an actual pipette tip's mounting collar facing the rack surface.
     tipPyramid.rotation.x = Math.PI;
     tipPyramid.rotation.y = Math.PI / 4; // diamond-facing orientation, purely cosmetic
-    tipPyramid.visible = false; // shown by the first "state" event for this spot
     tipPyramid.userData = { resourceName: node.name, resourceType: node.type, category: node.category };
     group.add(tipPyramid);
     hoverables.push(tipPyramid);
@@ -299,8 +323,14 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
     tipPyramid,
   });
 
+  // Children's own layout math (e.g. the tip-spot pyramid's "where's the
+  // rack's real surface" calculation above) needs the parent's *declared*
+  // size_z, not whatever we chose to actually render it as -- thin
+  // categories deliberately render shorter than their declared height, and
+  // that shrink must not shift where a child thinks its parent's surface is.
+  const declaredSizeZ = node.size_z ?? 0;
   for (const child of node.children ?? []) {
-    const childObj = buildResourceObject(child, false, sizeZ);
+    const childObj = buildResourceObject(child, false, declaredSizeZ);
     group.add(childObj);
   }
 
@@ -327,7 +357,7 @@ function applyState(resourceName, state) {
 
   if (Object.prototype.hasOwnProperty.call(state, "tip")) {
     const hasTip = state.tip !== null && state.tip !== undefined;
-    if (entry.tipPyramid) entry.tipPyramid.visible = hasTip;
+    if (entry.tipPyramid) entry.tipPyramid.material.color.setHex(hasTip ? TIP_PRESENT_COLOR : EMPTY_COLOR);
   } else if (!entry.mesh) {
     return;
   } else if (Object.prototype.hasOwnProperty.call(state, "volume")) {
@@ -399,7 +429,7 @@ class Channel {
     // bit wider for readability, while staying under half the 9mm channel
     // spacing so adjacent channels' tips never touch.
     const tipGeom = new THREE.ConeGeometry(CHANNEL_TIP_RADIUS, CHANNEL_TIP_HEIGHT, 4);
-    this.tipMesh = new THREE.Mesh(tipGeom, new THREE.MeshLambertMaterial({ color: TIP_EMPTY_COLOR }));
+    this.tipMesh = new THREE.Mesh(tipGeom, new THREE.MeshLambertMaterial({ color: EMPTY_COLOR }));
     this.tipMesh.position.y = -CHANNEL_TIP_HEIGHT / 2;
     // Flip apex-down (see the matching comment in buildResourceObject).
     this.tipMesh.rotation.x = Math.PI;
@@ -423,7 +453,7 @@ class Channel {
   setTip(visible) {
     this.hasTip = visible;
     this.tipMesh.visible = visible;
-    this.tipMesh.material.color.setHex(visible ? TIP_PRESENT_COLOR : TIP_EMPTY_COLOR);
+    this.tipMesh.material.color.setHex(visible ? TIP_PRESENT_COLOR : EMPTY_COLOR);
   }
 
   pulse() {
@@ -462,6 +492,15 @@ class Channel {
   // than their ~1.6s animation takes to play out, which happens routinely):
   // a fixed-delay timer drifts out of sync with where the channel actually
   // visually is, while this fires exactly on arrival regardless of backup.
+  // `target.x`/`target.y` may be `null`, meaning "stay at whatever x/y this
+  // leg actually starts from" -- used for the rise-to-safe-height leg,
+  // which must not move horizontally. It can't just capture `this.pos.x/y`
+  // at enqueue time: since ops routinely arrive faster than their ~1.6s
+  // animation plays out, the queue backs up, and a snapshot taken now can
+  // be stale by the time this leg actually starts (frequently still
+  // showing the channel's *initial* position from before it ever moved).
+  // Resolving null x/y lazily, right when the leg starts in update(),
+  // sidesteps that entirely.
   enqueue(target, duration, onComplete) {
     this.queue.push({ target, duration, onComplete });
   }
@@ -472,6 +511,8 @@ class Channel {
       if (this.current) {
         this.current.elapsed = 0;
         this.current.from = { ...this.pos };
+        if (this.current.target.x === null) this.current.target.x = this.current.from.x;
+        if (this.current.target.y === null) this.current.target.y = this.current.from.y;
       }
     }
     if (!this.current) return;
@@ -529,7 +570,9 @@ function animateChannelOp(entry, { onArrive } = {}) {
   // enter it (see docs/PLAN.md for the "pipette entering the well" bug this
   // fixes).
   const targetZ = entry.z + CHANNEL_TIP_HEIGHT;
-  ch.enqueue({ x: ch.pos.x, y: ch.pos.y, z: restZ }, scaled(RISE_MS));
+  // x/y: null means "stay wherever this leg actually starts" -- see
+  // enqueue()'s docstring for why that can't just be ch.pos.x/y here.
+  ch.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
   ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, scaled(TRAVEL_MS));
   // onArrive fires exactly when this leg's tween completes -- see enqueue()'s
   // docstring for why that's not the same as a fixed setTimeout delay.
