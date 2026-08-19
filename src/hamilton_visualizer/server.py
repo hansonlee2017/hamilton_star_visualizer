@@ -70,6 +70,12 @@ class VisualizerServer:
     self._send_locks: Dict[WebSocket, asyncio.Lock] = {}
     self._scene: Optional[Dict[str, Any]] = None
     self._num_channels: Optional[int] = None
+    # resource name -> its most recent "state" event, so a client connecting
+    # *after* e.g. a tip rack's initial "these spots have tips" broadcast
+    # (which happens once, synchronously, during setup() -- often well
+    # before the 10s grace period most demos wait before doing anything
+    # else) still sees the correct current picture instead of an empty one.
+    self._latest_state: Dict[str, Dict[str, Any]] = {}
     self._events: Deque[Tuple[float, Dict[str, Any]]] = deque(maxlen=MAX_EVENT_HISTORY)
     self._uv_server: Optional[uvicorn.Server] = None
     self._serve_task: Optional["asyncio.Task[None]"] = None
@@ -114,6 +120,8 @@ class VisualizerServer:
           await self._send(
             websocket, {"type": "scene", "deck": self._scene, "num_channels": self._num_channels}
           )
+        for state_event in self._latest_state.values():
+          await self._send(websocket, state_event)
         while True:
           raw = await websocket.receive_text()
           try:
@@ -158,6 +166,7 @@ class VisualizerServer:
 
     self._scene = scene
     self._num_channels = num_channels
+    self._latest_state.clear()
     await self.broadcast({"type": "scene", "deck": scene, "num_channels": num_channels})
 
   def schedule_broadcast(self, event: Dict[str, Any]) -> None:
@@ -173,6 +182,10 @@ class VisualizerServer:
     # client that opens the page late (or reconnects) can still `replay()`
     # everything that happened before it arrived.
     self._events.append((time.monotonic(), event))
+    if event.get("type") == "state":
+      # Keep only the latest state per resource -- see _latest_state's
+      # docstring for why new connections need this, not just history.
+      self._latest_state[event["resource"]] = event
     for client in list(self._clients):
       try:
         await self._send(client, event)

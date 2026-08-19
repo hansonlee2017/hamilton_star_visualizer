@@ -369,6 +369,49 @@ wells/tip-spots in z and use black for empty ones.
       untouched-but-prefilled one (200/360µL) both read distinct shades of
       green between black and full, proportional to fill.
 
+## Review round 5 (2026-08-18)
+
+User feedback: tip racks should show as filled at the very start, not just
+after a replay; the destination plate's wells looked a different (and
+inconsistent) color from the source plate's and from unused wells.
+
+- [x] **Tip racks not filled at first connect.** Real bug, and the direct
+      cause of "only visible after Replay" from round 3 lingering in a new
+      form: `VisualizerServer` cached the *scene* for newly-connecting
+      clients but never the latest *state* per resource. Since
+      `_broadcast_initial_state()` (added two rounds back) fires
+      synchronously during `setup()` -- normally well before a demo's
+      grace-period sleep even starts -- any client connecting during that
+      "now would be a good time to open the browser" window had already
+      missed it, and would show an all-black/empty scene until clicking
+      Replay. Added `VisualizerServer._latest_state` (resource name -> its
+      most recent state event); new connections now receive it right after
+      the scene, same as replay already did via history. Verified live:
+      connecting mid-run (before the demo's first pipetting step) now shows
+      the pre-filled tip rack immediately, no Replay needed.
+- [x] **Destination-plate wells "look wrong."** Not a rendering bug --
+      checked the actual numbers live: `source_plate_well_A1` (150/360µL,
+      used) vs `_A4` (200/360µL, untouched) vs `dest_plate_well_A1`
+      (50/360µL, used) vs `_A4` (0/360µL, untouched) all came back as
+      different shades of the *same* single teal-to-black gradient,
+      exactly tracking their real (and genuinely different) volumes --
+      the demo only ever dispenses 50µL into a 360µL-max well, so a
+      "used" destination well is only ~14% full. The actual problem: a
+      *linear* volume fraction makes anything under ~20% nearly
+      indistinguishable from truly empty, so the destination plate's used
+      wells (14%) looked almost as black as its untouched ones (0%), while
+      the source plate's wells (42-56%, since the demo pre-fills them to
+      200µL for the demo to have something to aspirate) looked clearly
+      green -- reading as "inconsistent" even though every well was
+      colored correctly for its own volume. Changed the fraction to
+      `Math.sqrt(rawFraction)` before the color lerp: boosts the low end
+      (14% -> 37% along the gradient) while leaving 0% at 0 and 100% at
+      100% and preserving monotonic ordering, so a small-but-real volume
+      now reads as clearly non-empty without misrepresenting which well
+      has more liquid. Verified live: the same 50µL destination well went
+      from `0c5d42` (barely different from black) to `1a946b` (clearly
+      green), while the 0µL one is still exactly `000000`.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

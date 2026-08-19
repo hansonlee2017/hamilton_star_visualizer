@@ -362,7 +362,14 @@ function applyState(resourceName, state) {
     return;
   } else if (Object.prototype.hasOwnProperty.call(state, "volume")) {
     const maxVolume = state.max_volume || 1;
-    const frac = THREE.MathUtils.clamp((state.volume ?? 0) / maxVolume, 0, 1);
+    const rawFrac = THREE.MathUtils.clamp((state.volume ?? 0) / maxVolume, 0, 1);
+    // sqrt rather than the raw fraction: a linear scale makes small-but-real
+    // volumes (e.g. a 50uL dispense into a 360uL well, 14%) look almost
+    // identical to genuinely empty (0%), which is what a well right after a
+    // dispense typically looks like right next to a well that's never been
+    // touched. sqrt boosts the low end while keeping 0 at 0, 1 at 1, and the
+    // ordering monotonic, so "more liquid" still always reads as "brighter."
+    const frac = Math.sqrt(rawFrac);
     const c = VOLUME_EMPTY_COLOR.clone().lerp(VOLUME_FULL_COLOR, frac);
     entry.mesh.material.color.copy(c);
   }
