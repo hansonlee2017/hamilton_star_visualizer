@@ -10,24 +10,37 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from pylabrobot.resources import Resource
+from pylabrobot.resources import Coordinate, Resource
 from pylabrobot.resources.tip import Tip
 from pylabrobot.resources.tip_rack import TipSpot
 
 
-def resource_point(resource: Resource) -> Dict[str, float]:
-  """Absolute (x, y, z) of the top-center of ``resource``, in deck mm.
+def _apply_offset(loc: Coordinate, offset: Optional[Coordinate]) -> Coordinate:
+  return loc if offset is None else loc + offset
 
-  This is an approximation of "where a channel would go to act on this
-  resource" -- good enough for simple bounding-box animation, not a
+
+def resource_point(resource: Resource, offset: Optional[Coordinate] = None) -> Dict[str, float]:
+  """Absolute (x, y, z) of the top-center of ``resource`` plus ``offset``, in
+  deck mm.
+
+  ``offset`` matters more than it looks: it's how PyLabRobot spreads
+  multiple channels that are nominally acting on the *same* resource --
+  e.g. ``discard_tips()`` sends every channel to the deck's one Trash, with
+  a small per-channel offset (``compute_channel_offsets(..., spread="tight")``)
+  so they don't all collapse onto the same point. Every op carries an
+  ``offset`` (``Coordinate.zero()`` when not otherwise set), mirroring how
+  ``STARBackend`` itself always adds it to the resource's raw location.
+
+  This is otherwise an approximation of "where a channel would go to act on
+  this resource" -- good enough for simple bounding-box animation, not a
   substitute for real motion planning.
   """
 
-  loc = resource.get_absolute_location(x="c", y="c", z="t")
+  loc = _apply_offset(resource.get_absolute_location(x="c", y="c", z="t"), offset)
   return {"x": round(loc.x, 2), "y": round(loc.y, 2), "z": round(loc.z, 2)}
 
 
-def tip_grab_point(tip_spot: TipSpot, tip: Tip) -> Dict[str, float]:
+def tip_grab_point(tip_spot: TipSpot, tip: Tip, offset: Optional[Coordinate] = None) -> Dict[str, float]:
   """Absolute (x, y, z) of where a channel actually grabs a tip seated at
   ``tip_spot``, in deck mm.
 
@@ -46,12 +59,14 @@ def tip_grab_point(tip_spot: TipSpot, tip: Tip) -> Dict[str, float]:
   visualization's descend target matches where a channel would really stop.
   """
 
-  loc = tip_spot.get_absolute_location(x="c", y="c", z="b")
+  loc = _apply_offset(tip_spot.get_absolute_location(x="c", y="c", z="b"), offset)
   z = loc.z + tip.total_tip_length - tip.fitting_depth
   return {"x": round(loc.x, 2), "y": round(loc.y, 2), "z": round(z, 2)}
 
 
-def liquid_surface_point(resource: Resource, liquid_height: Optional[float]) -> Dict[str, float]:
+def liquid_surface_point(
+  resource: Resource, liquid_height: Optional[float], offset: Optional[Coordinate] = None
+) -> Dict[str, float]:
   """Absolute (x, y, z) of the liquid surface a channel would aspirate from
   or dispense into ``resource`` (a well/container), in deck mm.
 
@@ -75,7 +90,7 @@ def liquid_surface_point(resource: Resource, liquid_height: Optional[float]) -> 
   not exact; a substitute for real motion planning this is not.
   """
 
-  loc = resource.get_absolute_location(x="c", y="c", z="b")
+  loc = _apply_offset(resource.get_absolute_location(x="c", y="c", z="b"), offset)
   bottom_z = loc.z + (getattr(resource, "material_z_thickness", None) or 0)
 
   if liquid_height is None:
@@ -106,17 +121,22 @@ def channel_ops_event(
   channels: List[Dict[str, Any]] = []
   for op, channel in zip(ops, use_channels):
     tip = getattr(op, "tip", None)
+    offset = getattr(op, "offset", None)
     # pick_up_tips/drop_tips against a TipSpot (not e.g. a Trash) need the
     # tip-length-aware grab point -- see tip_grab_point(). aspirate/dispense
     # need the liquid-surface-aware point -- see liquid_surface_point().
     # Everything else (drop_tips into a Trash, 96-head via resource_event)
-    # uses the generic top-anchor approximation.
+    # uses the generic top-anchor approximation. All three apply `offset`,
+    # which matters even when every channel in a call nominally targets the
+    # *same* resource -- e.g. discard_tips() sends every channel to the
+    # deck's one Trash, distinguished only by a per-channel offset; without
+    # applying it, all those channels would collapse onto the same point.
     if op_name in ("pick_up_tips", "drop_tips") and tip is not None and isinstance(op.resource, TipSpot):
-      point = tip_grab_point(op.resource, tip)
+      point = tip_grab_point(op.resource, tip, offset)
     elif op_name in ("aspirate", "dispense"):
-      point = liquid_surface_point(op.resource, getattr(op, "liquid_height", None))
+      point = liquid_surface_point(op.resource, getattr(op, "liquid_height", None), offset)
     else:
-      point = resource_point(op.resource)
+      point = resource_point(op.resource, offset)
     entry: Dict[str, Any] = {"channel": channel, "resource": op.resource.name, **point}
     if volume_attr is not None:
       entry["volume"] = getattr(op, volume_attr)
@@ -126,8 +146,16 @@ def channel_ops_event(
   return {"type": "op", "op": op_name, "channels": channels}
 
 
-def resource_event(op_name: str, resource: Resource, **extra: Any) -> Dict[str, Any]:
+def resource_event(
+  op_name: str, resource: Resource, *, offset: Optional[Coordinate] = None, **extra: Any
+) -> Dict[str, Any]:
   """Build a ``{"type": "op", ...}`` event for a single-resource call (96-head
   and resource-move operations)."""
 
-  return {"type": "op", "op": op_name, "resource": resource.name, **resource_point(resource), **extra}
+  return {
+    "type": "op",
+    "op": op_name,
+    "resource": resource.name,
+    **resource_point(resource, offset),
+    **extra,
+  }

@@ -153,11 +153,11 @@ class VisualizerBackend(LiquidHandlerBackend):
   # -- 96 head (forwarded for interface completeness; not animated in v1) --
   async def pick_up_tips96(self, pickup: PickupTipRack, **backend_kwargs) -> None:
     await self._inner.pick_up_tips96(pickup, **backend_kwargs)
-    await self._server.broadcast(resource_event("pick_up_tips96", pickup.resource))
+    await self._server.broadcast(resource_event("pick_up_tips96", pickup.resource, offset=pickup.offset))
 
   async def drop_tips96(self, drop: DropTipRack, **backend_kwargs) -> None:
     await self._inner.drop_tips96(drop, **backend_kwargs)
-    await self._server.broadcast(resource_event("drop_tips96", drop.resource))
+    await self._server.broadcast(resource_event("drop_tips96", drop.resource, offset=drop.offset))
 
   async def aspirate96(
     self, aspiration: Union[MultiHeadAspirationPlate, MultiHeadAspirationContainer]
@@ -168,7 +168,9 @@ class VisualizerBackend(LiquidHandlerBackend):
       if isinstance(aspiration, MultiHeadAspirationPlate)
       else aspiration.container
     )
-    await self._server.broadcast(resource_event("aspirate96", resource, volume=aspiration.volume))
+    await self._server.broadcast(
+      resource_event("aspirate96", resource, offset=aspiration.offset, volume=aspiration.volume)
+    )
 
   async def dispense96(
     self, dispense: Union[MultiHeadDispensePlate, MultiHeadDispenseContainer]
@@ -179,21 +181,23 @@ class VisualizerBackend(LiquidHandlerBackend):
       if isinstance(dispense, MultiHeadDispensePlate)
       else dispense.container
     )
-    await self._server.broadcast(resource_event("dispense96", resource, volume=dispense.volume))
+    await self._server.broadcast(
+      resource_event("dispense96", resource, offset=dispense.offset, volume=dispense.volume)
+    )
 
   # -- resource movement (moving plates is out of scope for v1 animation; --
   # -- forwarded and logged so the event log panel still shows it) --------
   async def pick_up_resource(self, pickup: ResourcePickup) -> None:
     await self._inner.pick_up_resource(pickup)
-    await self._server.broadcast(resource_event("pick_up_resource", pickup.resource))
+    await self._server.broadcast(resource_event("pick_up_resource", pickup.resource, offset=pickup.offset))
 
   async def move_picked_up_resource(self, move: ResourceMove) -> None:
     await self._inner.move_picked_up_resource(move)
-    await self._server.broadcast(resource_event("move_picked_up_resource", move.resource))
+    await self._server.broadcast(resource_event("move_picked_up_resource", move.resource, offset=move.offset))
 
   async def drop_resource(self, drop: ResourceDrop) -> None:
     await self._inner.drop_resource(drop)
-    await self._server.broadcast(resource_event("drop_resource", drop.resource))
+    await self._server.broadcast(resource_event("drop_resource", drop.resource, offset=drop.offset))
 
   # -- misc passthroughs ----------------------------------------------------
   async def request_tip_presence(self):

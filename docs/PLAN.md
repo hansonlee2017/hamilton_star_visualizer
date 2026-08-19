@@ -241,6 +241,68 @@ switch the demo from `drop_tips` to `discard_tips`, and an aspirate/dispense
   `_send()`, which recursively replaces non-finite floats (`inf`/`-inf`/
   `nan`) with `null`.
 
+## Review round 3 (2026-08-18)
+
+User feedback after round 2: tips only visible in the first of 3 loop
+iterations and shaped like "droplets" not pyramids (and no visible flow
+animation, possibly downstream of that); the cylindrical channel body
+visibly entering wells instead of just the tip; discarded channels
+visually merging into one object instead of staying 9mm apart; a request
+for a slower playback option to review animations more closely.
+
+- [x] **Tip shape.** Root cause: `THREE.ConeGeometry` points its apex
+      toward +Y by default (an upright cone/party-hat), and nothing was
+      flipping it -- so every tip pyramid, in the rack and on the channel,
+      was apex-up/base-down, the opposite of an inverted pyramid, which
+      read as a "droplet" at low resolution. Added `rotation.x = Math.PI`
+      to both. Also bumped the channel's carried-tip size
+      (`CHANNEL_TIP_RADIUS`/`CHANNEL_TIP_HEIGHT`) -- see next item for why.
+- [x] **Body entering wells / "only first iteration."** Both traced to the
+      same design gap: `animateChannelOp()` was sending the *group origin*
+      (where body meets tip) to `entry.z` (the server's computed target for
+      the tip's *apex*) with no compensation for the tip's own rendered
+      length -- so the body's bottom face ended up sitting right at the
+      target depth instead of comfortably above it, and the tip's apex
+      overshot *below* the target by half the tip's height. Fixed by
+      offsetting the descend/hold target by `CHANNEL_TIP_HEIGHT`
+      (`targetZ = entry.z + CHANNEL_TIP_HEIGHT`), so the apex lands exactly
+      on target and the body clears it. Verified live for a tip pick-up:
+      apex at world z=218.55 (matches the server's `tip_grab_point` target
+      exactly), body bottom at 253.75 -- 18.8mm clear of the 234.95mm rack
+      surface.
+
+      The "only saw tips in the first iteration" symptom was a *separate*
+      bug in the same area: `onArrive` (which flips tip visibility and
+      fires the flow animation) was scheduled via `setTimeout(fn, fixedDelay)`
+      measured from *event arrival*, not from when the animation actually
+      reached that point in the (per-channel) queue. Since events arrive
+      faster (~0.5s apart) than an op takes to animate (~1.6s), the queue
+      backs up more with every iteration, so the fixed-delay timer drifts
+      further out of sync with the visual position each time -- by
+      iteration 2-3 it could fire while the channel was still elsewhere.
+      Fixed by giving `Channel.enqueue()` an optional `onComplete` that
+      fires exactly when *that* waypoint's tween finishes, and passing
+      `onArrive` as the descend leg's `onComplete` instead of a timer. This
+      also fixes the flow animation's timing, since it's triggered from the
+      same callback.
+- [x] **Channels merging together on discard.** Root cause: none of
+      `events.py`'s point functions ever applied `op.offset` -- which is
+      exactly how PyLabRobot spreads multiple channels that nominally
+      target the *same* resource. `discard_tips()` sends all 8 channels to
+      the deck's one `Trash`, distinguished only by a per-channel offset
+      (`compute_channel_offsets(..., spread="tight")`); ignoring it made
+      all 8 collapse onto the same point. Threaded `offset` through
+      `resource_point()`/`tip_grab_point()`/`liquid_surface_point()` and
+      every call site (`channel_ops_event()`, `resource_event()`, and its
+      callers in `visualizer_backend.py` for the 96-head/resource-move
+      ops, which have the same gap). Verified via an integration test
+      against a real `discard_tips()` call: 8 channels, y positions
+      exactly 9mm apart (`[342.7, 333.7, ..., 279.7]`).
+- [x] **Slower playback for review.** Added a speed dropdown (1x/0.5x/
+      0.25x) in the HUD, backed by a `durationScale` multiplier applied to
+      every keyframe/pulse/flow duration in `main.js`. Applies to live
+      viewing and replay alike, and can be changed mid-run.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

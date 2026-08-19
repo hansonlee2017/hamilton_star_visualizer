@@ -51,6 +51,14 @@ const TIP_EMPTY_COLOR = 0x555a62;
 // scale, same tradeoff as the gantry channel glyph size below.
 const TIP_PYRAMID_RADIUS = 3.2;
 const TIP_PYRAMID_HEIGHT = 16;
+// The channel's own carried-tip glyph is longer than the ones resting in
+// the rack -- see animateChannelOp()'s CHANNEL_TIP_HEIGHT offset, which
+// relies on this length to keep the channel *body* clear of whatever
+// labware the tip is reaching into (a well, a rack, the trash). Radius
+// stays under half the 9mm channel spacing so neighboring channels' tips
+// never visually touch.
+const CHANNEL_TIP_RADIUS = TIP_PYRAMID_RADIUS * 1.3;
+const CHANNEL_TIP_HEIGHT = TIP_PYRAMID_HEIGHT * 2.2;
 const VOLUME_EMPTY_COLOR = new THREE.Color(0x2c4f46);
 const VOLUME_FULL_COLOR = new THREE.Color(0x2ee6a8);
 const PULSE_COLOR = new THREE.Color(0xffffff);
@@ -75,11 +83,18 @@ const tooltipEl = document.getElementById("tooltip");
 const legendRowsEl = document.getElementById("legend-rows");
 const logListEl = document.getElementById("log-list");
 const replayBtn = document.getElementById("replay-btn");
+const speedSelect = document.getElementById("speed-select");
 
 replayBtn.addEventListener("click", () => {
   if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
   currentWs.send(JSON.stringify({ action: "replay" }));
   logEvent("replay", "requested from server");
+});
+
+// durationScale is declared with animateChannelOp() below (it's the thing
+// that reads it); this just writes it whenever the dropdown changes.
+speedSelect.addEventListener("change", () => {
+  durationScale = Number(speedSelect.value) || 1;
 });
 
 for (const [label, color] of LEGEND_ENTRIES) {
@@ -265,6 +280,10 @@ function buildResourceObject(node, isRoot, parentSizeZ) {
       rackTopInSpotLocalFrame - TIP_PYRAMID_HEIGHT / 2,
       -sizeY / 2
     );
+    // THREE.ConeGeometry's apex points toward +Y by default (an upright
+    // cone) -- flip it so the apex points down and the wide end is up,
+    // like an actual pipette tip's mounting collar facing the rack surface.
+    tipPyramid.rotation.x = Math.PI;
     tipPyramid.rotation.y = Math.PI / 4; // diamond-facing orientation, purely cosmetic
     tipPyramid.visible = false; // shown by the first "state" event for this spot
     tipPyramid.userData = { resourceName: node.name, resourceType: node.type, category: node.category };
@@ -374,11 +393,16 @@ class Channel {
     this.group.add(this.body);
 
     // Same inverted-pyramid shape as the tips resting in the rack (see
-    // buildResourceObject), just a little larger for readability at this
-    // camera distance.
-    const tipGeom = new THREE.ConeGeometry(TIP_PYRAMID_RADIUS * 1.4, TIP_PYRAMID_HEIGHT * 1.4, 4);
+    // buildResourceObject) -- a bit longer than those (see
+    // CHANNEL_TIP_HEIGHT) so the *body* clears the target labware's top by
+    // a comfortable margin once animateChannelOp() accounts for it, and a
+    // bit wider for readability, while staying under half the 9mm channel
+    // spacing so adjacent channels' tips never touch.
+    const tipGeom = new THREE.ConeGeometry(CHANNEL_TIP_RADIUS, CHANNEL_TIP_HEIGHT, 4);
     this.tipMesh = new THREE.Mesh(tipGeom, new THREE.MeshLambertMaterial({ color: TIP_EMPTY_COLOR }));
-    this.tipMesh.position.y = -(TIP_PYRAMID_HEIGHT * 1.4) / 2;
+    this.tipMesh.position.y = -CHANNEL_TIP_HEIGHT / 2;
+    // Flip apex-down (see the matching comment in buildResourceObject).
+    this.tipMesh.rotation.x = Math.PI;
     this.tipMesh.rotation.y = Math.PI / 4;
     this.tipMesh.visible = false;
     this.group.add(this.tipMesh);
@@ -404,7 +428,7 @@ class Channel {
 
   pulse() {
     this.body.material.color.copy(PULSE_COLOR);
-    setTimeout(() => this.body.material.color.setHex(0x9aa0a8), 250);
+    setTimeout(() => this.body.material.color.setHex(0x9aa0a8), 250 * durationScale);
   }
 
   // direction: +1 to scroll "up" (aspirate -- liquid entering the tip),
@@ -417,8 +441,9 @@ class Channel {
     material.needsUpdate = true;
 
     const start = performance.now();
+    const duration = FLOW_PULSE_MS * durationScale;
     const step = (now) => {
-      const t = Math.min(1, (now - start) / FLOW_PULSE_MS);
+      const t = Math.min(1, (now - start) / duration);
       this.flowTexture.offset.y = direction * t * 2; // a couple of texture repeats' worth of scroll
       if (t < 1) {
         requestAnimationFrame(step);
@@ -431,8 +456,14 @@ class Channel {
     requestAnimationFrame(step);
   }
 
-  enqueue(target, duration) {
-    this.queue.push({ target, duration });
+  // `onComplete`, if given, fires exactly when *this* waypoint's tween
+  // finishes -- not a fixed wall-clock delay from when it was queued. That
+  // distinction matters once the queue backs up (events arriving faster
+  // than their ~1.6s animation takes to play out, which happens routinely):
+  // a fixed-delay timer drifts out of sync with where the channel actually
+  // visually is, while this fires exactly on arrival regardless of backup.
+  enqueue(target, duration, onComplete) {
+    this.queue.push({ target, duration, onComplete });
   }
 
   update(dtMs) {
@@ -459,7 +490,9 @@ class Channel {
     if (t >= 1) {
       this.pos = { ...target };
       this.applyPosition();
+      const { onComplete } = this.current;
       this.current = null;
+      if (onComplete) onComplete();
     }
   }
 }
@@ -479,19 +512,30 @@ const DESCEND_MS = 350;
 const HOLD_MS = 150;
 const RETRACT_MS = 350;
 
+// Playback speed for review -- a dropdown in the HUD sets this to 2 (0.5x)
+// or 4 (0.25x) so the animation is easier to follow, especially on replay.
+// Applied uniformly to every keyframe duration below and to flowPulse.
+let durationScale = 1;
+const scaled = (ms) => ms * durationScale;
+
 function animateChannelOp(entry, { onArrive } = {}) {
   const ch = channels[entry.channel];
   if (!ch) return;
-  ch.enqueue({ x: ch.pos.x, y: ch.pos.y, z: restZ }, RISE_MS);
-  ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, TRAVEL_MS);
-  ch.enqueue({ x: entry.x, y: entry.y, z: entry.z }, DESCEND_MS);
-  ch.enqueue({ x: entry.x, y: entry.y, z: entry.z }, HOLD_MS);
-  if (onArrive) {
-    // fire once the descend leg lands; approximate by delaying to match queue position
-    const delay = RISE_MS + TRAVEL_MS + DESCEND_MS;
-    setTimeout(onArrive, delay);
-  }
-  ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, RETRACT_MS);
+  // `entry.z` (from the server) is where the *tip's point* should end up --
+  // see events.py's tip_grab_point()/liquid_surface_point(). The channel
+  // group's own origin is where the tip *meets the body*, above the tip's
+  // apex by the tip's own rendered length -- offsetting by CHANNEL_TIP_HEIGHT
+  // keeps the body clear of the target labware, so only the tip appears to
+  // enter it (see docs/PLAN.md for the "pipette entering the well" bug this
+  // fixes).
+  const targetZ = entry.z + CHANNEL_TIP_HEIGHT;
+  ch.enqueue({ x: ch.pos.x, y: ch.pos.y, z: restZ }, scaled(RISE_MS));
+  ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, scaled(TRAVEL_MS));
+  // onArrive fires exactly when this leg's tween completes -- see enqueue()'s
+  // docstring for why that's not the same as a fixed setTimeout delay.
+  ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(DESCEND_MS), onArrive);
+  ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(HOLD_MS));
+  ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, scaled(RETRACT_MS));
 }
 
 function flashResource(resourceName) {
@@ -499,7 +543,7 @@ function flashResource(resourceName) {
   if (!entry || !entry.mesh) return;
   const base = entry.mesh.material.color.clone();
   entry.mesh.material.color.copy(PULSE_COLOR);
-  setTimeout(() => entry.mesh.material.color.copy(base), 250);
+  setTimeout(() => entry.mesh.material.color.copy(base), 250 * durationScale);
 }
 
 function handleOpEvent(msg) {
