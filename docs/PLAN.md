@@ -1033,6 +1033,99 @@ PicoGreen working solution (60mL Hamilton reservoir) into a Corning
       carrier, paired sample/assay plates, reservoir carrier, tube
       carrier) renders correctly end to end.
 
+## Review round 16 (2026-08-19)
+
+User feedback on the PicoGreen demo: use 7 channels for the TE-diluent
+distribution instead of one; during that single-channel phase, *every*
+channel should visibly move together even when only one is active; pick
+tip size by transfer volume (1-50uL/50-300uL/300-1000uL -> 50/300/1000uL
+tips); color-code tips by size (pink/yellow/white); move the reservoir to
+rail 2 and the two tubes to rails 7 and 8.
+
+- [x] **Researched real resources before touching anything.** Confirmed
+      exact factory names (`hamilton_96_tiprack_50uL_filter`/`_300uL_
+      filter`), and that a `Tip`'s `nominal_volume` (not `maximal_volume`,
+      which is a real ~10-20% Hamilton overfill allowance, e.g. 1065 for a
+      "1000uL" tip) is the nameplate value to classify/color by. Confirmed
+      PyLabRobot has no small Hamilton Eppendorf tube carrier (minimum is
+      24/32 sites) -- "tubes to slot 7 and 8" means two separate
+      32-carrier instances, one tube each, not a smaller part.
+- [x] **7-channel diluent distribution + real drag-along.** Rewrote the
+      dilution stage: channels 1-7 each aspirate 100uL from the tiny
+      diluent tube in turn (only one channel fits its ~10mm opening at a
+      time), then all 7 dispense into B12-H12 simultaneously. Fixed
+      `planGantryPasses()` to actually implement what its own docstring
+      already claimed ("every other loaded channel gets nudged") --
+      previously `channelIndices` only ever came from the current call's
+      own `entries`, so a single-channel call left the other 7 channels
+      completely stationary instead of dragged along. Now derives the
+      extra dragged-along channels from every channel currently loaded
+      with a tip, not just the ones this specific call targets.
+- [x] **A real staleness bug in that fix, caught via a leg-count audit,
+      not just a screenshot.** The first version read
+      `channels[i].hasTip` -- Channel.setTip()'s flag, which only flips at
+      an op's own animation `onArrive`, routinely *well after* this event
+      was received (the same "events arrive faster than their ~1.6s
+      animation plays out" reality this file has design around before).
+      Planning a pass needs to know "is this channel loaded" at *event-
+      processing* time, not whenever its animation catches up -- reading
+      the animation-timed flag silently undercounted loaded channels for
+      every call issued before an earlier pick_up_tips's animation had
+      finished. Diagnosed by instrumenting `Channel.enqueue()` to count
+      total legs per channel and comparing against hand-derived expected
+      counts: channel 0 came up short by exactly one nudge-leg's worth
+      (32 = 8 missing nudges x 4 enqueues/nudge) out of an expected 128,
+      confirming legs were being dropped, not just mistimed. Fixed with
+      `loadedChannelsEager`, a plain `Set` updated synchronously the
+      instant a pick_up_tips/drop_tips event is *processed* (in
+      `handleOpEvent()`, before the animation is even queued), decoupled
+      from the animation-timed visual flag entirely.
+
+      Verified live: reinstrumented `enqueue()` to log total legs per
+      channel -- after the fix, channel 0 shows exactly 128 and channels
+      1-7 each show exactly 104, matching hand-derived expected counts
+      precisely (both wrong before the fix: 96 and 56). Recorded all 8
+      channels' x every 50ms across the *entire* protocol afterward: 0 of
+      2777 samples showed any spread between channels -- every channel
+      stayed exactly arm-synchronized the whole run, a strictly stronger
+      result than round 15's per-pass-only guarantee.
+- [x] **Tip size by transfer volume.** Added `tip_rack_for_volume()`
+      (1-50uL/50-300uL/300-1000uL -> 50/300/1000uL tip racks, picking the
+      smallest tip that comfortably holds a volume, matching real
+      practice) and three tip racks on one carrier. All of this demo's
+      real volumes (5-200uL) only ever need the 50uL and 300uL racks; the
+      1000uL rack is present for completeness/future volume changes but
+      unused this run.
+- [x] **Tip color by capacity.** `node["tip_max_volume_ul"]` (from
+      `Tip.nominal_volume`) now flows through the same two paths
+      `tip_length_mm` already used: `scene.py`'s `_inject_tip_info()`
+      (renamed from `_inject_tip_lengths()`, now reading one representative
+      tip once instead of two separate lookups) for resting tips, and
+      `events.py`'s `channel_ops_event()` for a channel's carried tip.
+      Frontend gained `tipColorForVolume()` (<=50 pink, <=300 yellow,
+      otherwise white) used everywhere a tip's "present" color is set
+      (`tipVisual()`, `Channel.setTip()`), replacing the old flat
+      `TIP_PRESENT_COLOR` constant; a resting tip_spot's capacity is known
+      once at scene-build time and cached on its `resourceIndex` entry
+      (`tipMaxVolumeUl`) rather than re-sent on every state update, since
+      -- unlike a channel, which switches tips all run -- a given rack
+      position always holds the same tip model. Legend updated to show
+      all three capacity colors.
+
+      Verified live: a fresh scene shows the three tip racks rendering
+      pink/yellow/white (`f48fb1`/`ffd54f`/`ffffff`) with `tipMaxVolumeUl`
+      50/300/1000 exactly.
+- [x] **Deck reposition.** Reservoir carrier to rails=2; dna_stock and
+      te_diluent each get their own 32-tube carrier (only site 0 used) at
+      rails=7 and rails=8 respectively. Tip and plate carriers moved to
+      rails=9 and rails=15 to make room, verified collision-free via
+      `assign_child_resource` (which raises on overlap) before writing the
+      final script.
+
+      Verified live: `reservoir_carrier_1`/`dna_stock_carrier`/
+      `te_diluent_carrier`/`tip_carrier_1`/`plate_carrier_1` report world x
+      122.5/235/257.5/280/415 -- exactly rails 2/7/8/9/15.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

@@ -74,7 +74,29 @@ const ENVELOPE_PLATFORM_THICKNESS = 10;
 // a thin slab, not the full block.
 const THIN_CATEGORIES = new Set(["tip_rack", "plate"]);
 const THIN_CATEGORY_THICKNESS = 3;
-const TIP_PRESENT_COLOR = 0xe0b23d;
+// A present tip's color depends on its nameplate capacity (real Hamilton
+// tips physically come in these -- see hamilton_96_tiprack_{50,300,1000}uL_
+// filter in this project's demos), read from tip_max_volume_ul wherever a
+// tip actually appears (a TipRack's own scene node for resting tips --
+// scene.py's _inject_tip_info() -- or a pick_up_tips op entry for a
+// channel's carried tip -- events.py's channel_ops_event()). Picking a tip
+// size by transfer volume matters for realism (a 5uL transfer in a 1000uL
+// tip is inaccurate on a real instrument) but isn't this file's job to
+// enforce -- it just needs to render whichever tip a protocol actually used
+// with the right color.
+const TIP_COLOR_BY_VOLUME = [
+  [50, 0xf48fb1], // pink
+  [300, 0xffd54f], // yellow
+  [Infinity, 0xffffff], // white
+];
+const TIP_PRESENT_COLOR_FALLBACK = 0xe0b23d; // unknown capacity -- the old flat amber
+function tipColorForVolume(maxVolumeUl) {
+  if (maxVolumeUl == null) return TIP_PRESENT_COLOR_FALLBACK;
+  for (const [threshold, color] of TIP_COLOR_BY_VOLUME) {
+    if (maxVolumeUl <= threshold) return color;
+  }
+  return TIP_PRESENT_COLOR_FALLBACK;
+}
 // Empty tip spots/wells are always rendered (not hidden) so a slot reads
 // as "empty" rather than "missing" -- black distinguishes that at a glance
 // from an occupied one, per user feedback.
@@ -112,7 +134,10 @@ const RAIL_LABEL_INTERVAL = 5;
 const LEGEND_ENTRIES = [
   ["Carrier", 0x5a6270],
   ["Tip rack", 0x3d6fa8],
-  ["Tip spot (empty / tip)", 0x8a8f98],
+  ["Tip spot (empty)", 0x8a8f98],
+  ["Tip (<=50uL)", 0xf48fb1],
+  ["Tip (<=300uL)", 0xffd54f],
+  ["Tip (<=1000uL)", 0xffffff],
   ["Plate", 0x6a5a94],
   ["Well (fill level)", 0x59c9a5],
   ["Trash", 0x8a3d3d],
@@ -366,7 +391,7 @@ function addRailLines(parentGroup, node, deckSurfaceZ) {
   parentGroup.add(new THREE.LineSegments(geometry, material));
 }
 
-function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
+function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm, parentTipMaxVolumeUl) {
   const group = new THREE.Group();
   group.name = node.name;
 
@@ -544,6 +569,15 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
     node,
     baseColor: mesh ? mesh.material.color.clone() : null,
     tipPyramid,
+    // A tip_spot's own capacity, in µL -- known at scene-build time (every
+    // spot in a rack holds the same tip model) and constant for this
+    // spot's whole lifetime, unlike a *channel*'s carried tip (which
+    // switches models across a run and so needs its capacity threaded
+    // through each pick_up_tips op event instead -- see the "pick_up_tips"
+    // case in handleOpEvent()). Read by applyState()/
+    // applyEmbeddedResourceState() to color a present tip correctly
+    // without needing that data re-sent on every single state update.
+    tipMaxVolumeUl: node.category === "tip_spot" ? parentTipMaxVolumeUl ?? null : null,
     // Live volume, kept in sync by applyState()/applyEmbeddedResourceState()
     // below -- purely for the hover tooltip (see "Hover tooltips" section);
     // the mesh's own color/opacity is the actual visual state. maxVolume
@@ -559,11 +593,13 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
   // categories deliberately render shorter than their declared height, and
   // that shrink must not shift where a child thinks its parent's surface is.
   const declaredSizeZ = node.size_z ?? 0;
-  // A tip_rack node carries tip_length_mm (see scene.py); anything else
-  // just passes through whatever it received, in case of unexpected nesting.
+  // A tip_rack node carries tip_length_mm/tip_max_volume_ul (see scene.py);
+  // anything else just passes through whatever it received, in case of
+  // unexpected nesting.
   const tipLengthMm = node.tip_length_mm ?? parentTipLengthMm;
+  const tipMaxVolumeUl = node.tip_max_volume_ul ?? parentTipMaxVolumeUl;
   for (const child of node.children ?? []) {
-    const childObj = buildResourceObject(child, false, declaredSizeZ, tipLengthMm);
+    const childObj = buildResourceObject(child, false, declaredSizeZ, tipLengthMm, tipMaxVolumeUl);
     group.add(childObj);
   }
 
@@ -608,9 +644,9 @@ function volumeVisual(volume, maxVolume) {
   };
 }
 
-function tipVisual(hasTip) {
+function tipVisual(hasTip, maxVolumeUl) {
   return {
-    color: hasTip ? TIP_PRESENT_COLOR : EMPTY_COLOR,
+    color: hasTip ? tipColorForVolume(maxVolumeUl) : EMPTY_COLOR,
     opacity: hasTip ? FULL_OPACITY : EMPTY_OPACITY,
   };
 }
@@ -622,7 +658,7 @@ function applyState(resourceName, state) {
   if (Object.prototype.hasOwnProperty.call(state, "tip")) {
     const hasTip = state.tip !== null && state.tip !== undefined;
     if (entry.tipPyramid) {
-      const { color, opacity } = tipVisual(hasTip);
+      const { color, opacity } = tipVisual(hasTip, entry.tipMaxVolumeUl);
       entry.tipPyramid.material.color.setHex(color);
       entry.tipPyramid.material.opacity = opacity;
     }
@@ -647,7 +683,7 @@ function applyEmbeddedResourceState(entry) {
   if (!target) return;
   if (Object.prototype.hasOwnProperty.call(entry, "resource_has_tip")) {
     if (target.tipPyramid) {
-      const { color, opacity } = tipVisual(entry.resource_has_tip);
+      const { color, opacity } = tipVisual(entry.resource_has_tip, target.tipMaxVolumeUl);
       target.tipPyramid.material.color.setHex(color);
       target.tipPyramid.material.opacity = opacity;
     }
@@ -748,16 +784,18 @@ class Channel {
     this.group.position.copy(p);
   }
 
-  // `lengthMm`: the real length of the tip just picked up (from the
-  // pick_up_tips op event's tip_length_mm -- see events.py), so the glyph
-  // matches the actual tip instead of the CHANNEL_TIP_HEIGHT placeholder.
-  // Rebuilt (not just visually toggled) since it also feeds
-  // animateChannelOp's body-clearance math for every op this channel does
-  // until its next pick-up -- see `tipLength` below.
-  setTip(visible, lengthMm) {
+  // `lengthMm`/`maxVolumeUl`: the real length and nameplate capacity of
+  // the tip just picked up (from the pick_up_tips op event's
+  // tip_length_mm/tip_max_volume_ul -- see events.py), so the glyph
+  // matches the actual tip instead of the CHANNEL_TIP_HEIGHT placeholder
+  // and generic fallback color. Geometry is rebuilt (not just visually
+  // toggled) since length also feeds animateChannelOp's body-clearance
+  // math for every op this channel does until its next pick-up -- see
+  // `tipLength` below.
+  setTip(visible, lengthMm, maxVolumeUl) {
     this.hasTip = visible;
     this.tipMesh.visible = visible;
-    this.tipMesh.material.color.setHex(visible ? TIP_PRESENT_COLOR : EMPTY_COLOR);
+    this.tipMesh.material.color.setHex(visible ? tipColorForVolume(maxVolumeUl) : EMPTY_COLOR);
     if (visible) {
       const length = lengthMm ?? CHANNEL_TIP_HEIGHT;
       if (length !== this.tipLength) {
@@ -862,12 +900,26 @@ class Channel {
 }
 
 let channels = [];
+// Which channels currently have a tip on, updated *eagerly* -- the instant
+// a pick_up_tips/drop_tips op event is processed (see handleOpEvent()) --
+// not from Channel.hasTip, which only flips at that op's own onArrive
+// (i.e. whenever its animation actually finishes playing, routinely well
+// after this event was received: events arrive faster than their ~1.6s
+// animation plays out, same as everywhere else in this file). planGantry
+// Passes() needs to know "is this channel loaded" *right now*, at planning
+// time, to decide whether to drag it along -- reading the animation-timed
+// flag instead undercounts loaded channels for every op processed before
+// an earlier pick_up_tips's animation has caught up, silently dropping
+// nudges (confirmed live: a channel's total enqueued legs came up short
+// exactly this way before this eager Set was added).
+const loadedChannelsEager = new Set();
 function ensureChannels(numChannels) {
   // Always rebuilt (not just when the count changes) so a fresh "scene"
   // message -- including the one that kicks off a replay -- also resets
   // the gantry back to its rest pose, not just the deck/plates/tips.
   for (const ch of channels) gantryGroup.remove(ch.group);
   channels = Array.from({ length: numChannels }, (_, i) => new Channel(i));
+  loadedChannelsEager.clear();
 }
 
 const RISE_MS = 350;
@@ -1012,11 +1064,18 @@ function resolveChannelYs(channelIndices, fixedY, preferredY, pitchMm) {
 // channel-slots apart they are, exceeds their actual row gap), it falls
 // back to one channel at a time, smallest index first -- exactly what a
 // real instrument does when a single move can't reach both. Every *other*
-// loaded channel (whether idle for this whole op or just this one stop)
-// gets nudged only as far as needed to stay clear, using each channel's
-// own live `pos.y` (not a value threaded in from the protocol script) as
-// its preferred position -- so this needs no cooperation from the Python
-// side beyond issuing one normal multi-channel call.
+// loaded channel -- whether idle for this whole op (this call doesn't
+// target it at all, e.g. the other 7 channels while one alone does a
+// single-channel serial dilution) or just this one stop -- gets nudged
+// only as far as needed to stay clear, using each channel's own live
+// `pos.y` (not a value threaded in from the protocol script) as its
+// preferred position. "Loaded" here means "currently has a tip on"
+// (`Channel.hasTip`), read directly off the renderer's own live state, not
+// just "present in this call's entries" -- so this needs no cooperation
+// from the Python side beyond issuing one normal multi-channel (or even
+// single-channel) call; it also means a lopsided single-channel stage no
+// longer leaves other channels' queues shorter than the busy one's (round
+// 15 needed a calculated wait to paper over exactly that gap).
 //
 // Returns passes ordered so that simply enqueuing each one's legs in
 // order -- onto every channel's own independent FIFO queue, see
@@ -1025,9 +1084,22 @@ function resolveChannelYs(channelIndices, fixedY, preferredY, pitchMm) {
 // plays its own legs out in the order they were enqueued, and every pass
 // here is only ever enqueued after the previous one.
 function planGantryPasses(entries) {
-  const channelIndices = entries.map((e) => e.channel).sort((a, b) => a - b);
+  const targetedChannels = entries.map((e) => e.channel).sort((a, b) => a - b);
   const byChannel = new Map(entries.map((e) => [e.channel, e]));
-  const xs = [...new Set(channelIndices.map((ch) => ROUND_MM(byChannel.get(ch).x)))].sort(
+  // Every *other* currently tip-loaded channel is dragged along too, even
+  // though this call gives it no target of its own -- a real Hamilton's 8
+  // channels share one arm, so a channel that picked up a tip earlier
+  // physically cannot stay parked while a single-channel call (e.g. one
+  // channel alone doing a serial dilution) moves the arm somewhere else.
+  // `loadedChannelsEager`, not `channels[i].hasTip` -- see that Set's own
+  // comment for why the animation-timed flag isn't safe to read here.
+  const loadedChannels = [...loadedChannelsEager];
+  const channelIndices = [...new Set([...targetedChannels, ...loadedChannels])].sort(
+    (a, b) => a - b
+  );
+  // xs only ever comes from targeted channels -- a merely-dragged-along
+  // channel has no target/x of its own to contribute a stop.
+  const xs = [...new Set(targetedChannels.map((ch) => ROUND_MM(byChannel.get(ch).x)))].sort(
     (a, b) => a - b
   );
 
@@ -1038,7 +1110,7 @@ function planGantryPasses(entries) {
   const passes = [];
 
   for (const x of xs) {
-    const columnChannels = channelIndices.filter((ch) => ROUND_MM(byChannel.get(ch).x) === x);
+    const columnChannels = targetedChannels.filter((ch) => ROUND_MM(byChannel.get(ch).x) === x);
 
     let groups = [columnChannels];
     try {
@@ -1120,10 +1192,13 @@ function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor } = {}) {
 function handleOpEvent(msg) {
   switch (msg.op) {
     case "pick_up_tips":
+      // Eagerly, synchronously, right now -- see loadedChannelsEager's own
+      // comment for why this can't wait for setTip()'s onArrive below.
+      for (const entry of msg.channels) loadedChannelsEager.add(entry.channel);
       animateChannelGroupOp(
         msg.channels,
         (entry) => () => {
-          channels[entry.channel]?.setTip(true, entry.tip_length_mm);
+          channels[entry.channel]?.setTip(true, entry.tip_length_mm, entry.tip_max_volume_ul);
           applyEmbeddedResourceState(entry);
         },
         { tipLengthFor: (entry) => entry.tip_length_mm }
@@ -1131,6 +1206,7 @@ function handleOpEvent(msg) {
       logEvent("pick_up_tips", msg.channels.map((c) => `p${c.channel}:${c.resource}`).join(", "));
       break;
     case "drop_tips":
+      for (const entry of msg.channels) loadedChannelsEager.delete(entry.channel);
       animateChannelGroupOp(msg.channels, (entry) => () => {
         channels[entry.channel]?.setTip(false);
         applyEmbeddedResourceState(entry);
