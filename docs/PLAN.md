@@ -942,6 +942,97 @@ within it -- "the number 5 is drawn at the border between rail 4 and 5."
       (212.5, i.e. rail 6's left border) -- and a screenshot shows every
       label sitting inside its own slot rather than on a dividing line.
 
+## Review round 15 (2026-08-19)
+
+User request: a new demo protocol for a PicoGreen dsDNA quantitation
+reaction -- samples in columns 1-3 of a 96-well PCR plate, a 2-fold serial
+dilution standard curve (8 wells, last one pure diluent) from a 100 ng/uL
+stock and TE diluent in 1.5mL Eppendorf tubes on a 32-tube carrier, diluted
+into column 12 of the sample plate, then 5uL sample/standard + 195uL
+PicoGreen working solution (60mL Hamilton reservoir) into a Corning
+360uL flat-bottom assay plate.
+
+- [x] **Researched every real resource before writing anything.** A PCR
+      plate needed to be *skirted* (`azenta_96_wellplate_200uL_Vb_
+      4titudeframestar`) -- PLR's `PlateHolder.assign_child_resource`
+      hard-rejects semi-skirted plates (common real PCR plates like
+      Thermo MicroAmp) on a standard carrier site. The 60mL reservoir
+      (`hamilton_1_trough_60mL_Vb`) needed `Trough_CAR_5R60_A00` (which,
+      despite its name, only has 4 sites in PLR's current definition).
+      The 32-tube carrier is `hamilton_tube_carrier_32_a00_insert_
+      eppendorf_1_5mL` holding `eppendorf_tube_1500uL_Vb` tubes --
+      `Tube_CAR_32_A00` and a couple of Eppendorf-tube aliases are
+      deprecated wrappers pointing at these. All four carriers verified
+      end-to-end on a real `STARLetDeck()` (rails 1/7/13/14, no
+      collisions) before any visualizer work started.
+- [x] **Two rendering bugs found and fixed, exposed by resource
+      categories this project had never used before.**
+      - `trough_carrier` (the reservoir's carrier) was missing from
+        `CARRIER_CATEGORIES` -- confirmed with real coordinates (declared
+        `size_z=104mm`, but its trough site attaches at only `z=63.5mm`)
+        that this is the exact same envelope-vs-payload gap already fixed
+        for every other carrier category in round 7; without the fix, the
+        reservoir would render buried inside a full-height solid box.
+      - `trough`/`tube` categories were missing from `CATEGORY_COLORS`
+        (cosmetic -- fell back to a generic gray) and, more importantly,
+        from `_LIVE_CALLBACK_EXCLUDED_CATEGORIES` -- since
+        `channel_ops_event()`'s embedded-volume logic is already
+        category-agnostic (any Container with a tracker, not
+        well-specific), any aspirate/dispense against the reservoir or a
+        tube would have raced a live "state" broadcast ahead of the
+        gantry animation, reproducing round 6's original bug for two
+        categories nobody had exercised yet. Fixed preemptively, before
+        the demo ever ran, by reasoning from the existing code rather
+        than waiting to observe it break.
+- [x] **A real protocol-design bug: the top standard well was fully
+      drained.** First version aspirated only `DILUTION_VOLUME` (100uL)
+      of neat stock into A12; the very next step (`A12 -> B12`) pulls
+      that same 100uL back out, leaving A12 at 0uL -- enough for the
+      dilution math to work, but nothing left for A12's own 5uL transfer
+      to the assay plate later. Live run confirmed this exactly:
+      `TooLittleLiquidError: 5.0uL > 0.0uL`. Fixed by loading A12 with
+      *2x* `DILUTION_VOLUME`, the standard technique for a serial
+      dilution's first tube -- verified by hand-tracing the resulting
+      volumes for every well (A-F settle at 100uL, G at 200uL, H at
+      100uL, all comfortably above the later 5uL draw) before rerunning.
+- [x] **A real, harder-to-spot bug: channel 0 fell ~38s behind channels
+      1-7, so later multi-channel reads caught it mid-backlog.** After
+      the liquid-volume fix, live verification still showed 5 of 8
+      column-12 wells at their *pre*-transfer volumes (confirmed via the
+      wells' actual rendered opacity, not just cached tooltip state, so
+      this was a real rendering bug, not a stale metadata field).
+      Traced with temporary logging in `planGantryPasses()`/
+      `applyEmbeddedResourceState()`: the server's embedded volume data
+      was correct for every channel the whole time -- channel 0 was
+      simply still working through its own ~38.4s single-channel
+      dilution-stage backlog (24 legs: pick-up, top-standard aspirate+
+      dispense, diluent aspirate+7 dispenses, 6 serial aspirate/dispense
+      pairs, discard) when the query ran, while channels 1-7 (with no
+      such backlog) had already reached and applied their own later
+      column-12 legs. This is a real gap round 11's architecture didn't
+      anticipate: it guarantees passes never overlap *within* one
+      multi-channel op, but a lopsided single-channel stage can leave one
+      channel's queue far longer than the others' *across* stages, and
+      nothing currently drags idle channels along during a call that
+      doesn't target them (see `planGantryPasses()`'s docstring -- it
+      only ever considers channels actually present in a given call's
+      `entries`). On a real Hamilton this desync is physically
+      impossible -- channels 1-7 can't do anything elsewhere while
+      channel 0 alone is tied to the one shared arm -- so the fix belongs
+      in the protocol script, not the visualizer: added a calculated
+      wait (24 legs x ~1.6s/leg x 1.3 margin, the same proportional
+      safety margin round 9 needed for a single pass) after the dilution
+      stage, giving channel 0's real backlog time to fully drain before
+      the 8-channel stages begin.
+
+      Verified live: reran the full protocol and checked every column-12
+      sample-plate well and all 32 assay-plate wells immediately after
+      the script printed "finished," with no extra waiting -- all matched
+      their expected volumes exactly (A-F/H at 95uL, G at 195uL; all 32
+      assay wells at 200uL). Screenshot confirms the full deck (tip
+      carrier, paired sample/assay plates, reservoir carrier, tube
+      carrier) renders correctly end to end.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

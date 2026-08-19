@@ -90,6 +90,12 @@ examples/cherry_pick_demo.py       cherry-picking demo: an ordinary lh.dispense(
                                     scattered smiley-face pattern, animated column-by-column
                                     the way a real Hamilton STAR's shared-x gantry actually
                                     would -- the visualizer works this out on its own
+examples/picogreen_demo.py         PicoGreen dsDNA quantitation demo: an 8-point 2-fold
+                                    serial dilution standard curve (single channel, tube ->
+                                    plate and well -> well), then 8-channel sample/standard
+                                    and PicoGreen-reagent transfers into an assay plate --
+                                    exercises a reservoir, Eppendorf tubes, and a second
+                                    plate type alongside the usual carriers/tip racks
 ```
 
 ## Development

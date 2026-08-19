@@ -27,7 +27,15 @@ const CATEGORY_COLORS = {
   plate_holder: 0x5a6270,
   mfx_carrier: 0x5a6270,
   tube_carrier: 0x5a6270,
+  trough_carrier: 0x5a6270,
   tip_rack: 0x3d6fa8,
+  // Same teal as "well" -- a trough/tube is a liquid container too, and
+  // gets the same volumeVisual() fill-level color/opacity treatment
+  // automatically (that logic isn't well-specific, just Container-shaped
+  // "has a volume" state), so starting from the same base color keeps
+  // that gradient reading the same way.
+  trough: 0x59c9a5,
+  tube: 0x59c9a5,
   // Deliberately *not* a shade of green: a plate's base needs to read as a
   // distinct supporting structure underneath its wells, the same way the
   // tip rack's blue base reads as distinct from its amber/black tips --
@@ -46,7 +54,18 @@ const DEFAULT_COLOR = 0x6b7280;
 // own structure) -- not a value you'd want to draw as a solid box directly.
 // The deck is drawn as a thin platform; carriers are drawn as a shaft from
 // their base up to their payload's holder -- see buildResourceObject().
-const CARRIER_CATEGORIES = new Set(["tip_carrier", "plate_carrier", "mfx_carrier", "tube_carrier"]);
+const CARRIER_CATEGORIES = new Set([
+  "tip_carrier",
+  "plate_carrier",
+  "mfx_carrier",
+  "tube_carrier",
+  // Confirmed the same envelope-vs-payload gap as every other carrier here
+  // (e.g. Trough_CAR_5R60_A00: declared size_z=104mm, but its trough site
+  // attaches at only z=63.5mm) -- without this, a reservoir carrier renders
+  // as a full-height solid box that buries its own trough, the same bug
+  // already fixed for the others in round 7.
+  "trough_carrier",
+]);
 const ENVELOPE_PLATFORM_THICKNESS = 10;
 // tip_rack and plate have the same "declared size_z is bigger than the
 // visible surface" problem as carriers -- their actual payload (a TipSpot's

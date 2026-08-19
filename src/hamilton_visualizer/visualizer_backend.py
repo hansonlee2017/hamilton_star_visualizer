@@ -121,17 +121,21 @@ class VisualizerBackend(LiquidHandlerBackend):
     await self._server.wait_for_start()
     await self._broadcast_initial_state(self.deck)
 
-  # tip_spot/well changes driven by pick_up_tips/drop_tips/aspirate/dispense
-  # are instead delivered by channel_ops_event() embedding the resulting
-  # state directly in the "op" event -- see its docstring for why: a live
-  # state callback fires the moment LiquidHandler queues the tracker change,
-  # *before* it even calls this backend, so by the time it reaches the
-  # frontend the color change has usually already been applied ahead of the
-  # gantry animation that's supposed to cause it. Skipping the live callback
-  # for just these two categories avoids that race; _broadcast_initial_state
-  # (a direct one-time push, not a callback) still covers their starting
-  # color, and any other resource category still gets live updates normally.
-  _LIVE_CALLBACK_EXCLUDED_CATEGORIES = frozenset({"tip_spot", "well"})
+  # tip_spot/well/trough/tube changes driven by pick_up_tips/drop_tips/
+  # aspirate/dispense are instead delivered by channel_ops_event() embedding
+  # the resulting state directly in the "op" event -- see its docstring for
+  # why: a live state callback fires the moment LiquidHandler queues the
+  # tracker change, *before* it even calls this backend, so by the time it
+  # reaches the frontend the color change has usually already been applied
+  # ahead of the gantry animation that's supposed to cause it.
+  # channel_ops_event()'s embedded-volume logic is category-agnostic (any
+  # Container with a tracker), so this set is really "every category that
+  # can be an aspirate/dispense target" -- trough and tube included, for a
+  # reservoir and Eppendorf tubes. Skipping the live callback for just these
+  # avoids that race; _broadcast_initial_state (a direct one-time push, not
+  # a callback) still covers their starting color, and any other resource
+  # category still gets live updates normally.
+  _LIVE_CALLBACK_EXCLUDED_CATEGORIES = frozenset({"tip_spot", "well", "trough", "tube"})
 
   def _register_state_callbacks(self, resource) -> None:
     """Recursively subscribe to state changes so the frontend's static scene
