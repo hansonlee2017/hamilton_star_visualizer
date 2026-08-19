@@ -884,6 +884,45 @@ the deck's rails every 5 (5, 10, 15, ...); show a well's volume on hover.
       "123.4 / 360 µL" under the resource name/type, styled in the same
       green used for the well legend swatch.
 
+## Review round 13 (2026-08-19)
+
+User feature requests: draw lines on the deck marking the borders between
+rails; hovering a plate or carrier should show its specific catalog model
+(e.g. "cor_96_wellplate_360uL_Fb", "TIP_CAR_480_A00"), not just its coarse
+type.
+
+- [x] **Rail border lines.** Added `addRailLines()`, drawing a thin line
+      at *every* rail boundary (not just every `RAIL_LABEL_INTERVAL`-th
+      one like the round-12 number labels) -- `numRails + 1` lines
+      bracketing each 22.5mm-wide slot, spanning the deck's full y depth,
+      sitting on the platform's own top surface. Uses normal depth-testing
+      (unlike the always-on-top label sprites), so a carrier sitting on
+      the rail correctly occludes the line segment underneath it, since a
+      line "on the deck" should behave like a real surface marking, not a
+      HUD overlay. One `THREE.LineSegments` with a single `BufferGeometry`
+      for the whole set rather than one object per line.
+
+      Verified live: screenshot shows a clean ruled grid across the full
+      deck surface, with lines visibly interrupted where the tip and
+      plate carriers sit on top of them.
+- [x] **Model in tooltip.** `node.model` -- the catalog identifier for the
+      specific factory/constant that built this resource instance -- is
+      already a real `Resource` field PyLabRobot includes in
+      `serialize()` (confirmed directly: `cor_96_wellplate_360uL_Fb(name=
+      "p").model == "cor_96_wellplate_360uL_Fb"`), distinct from the much
+      coarser class name (`resourceType`, e.g. "Plate") the tooltip
+      already showed. Threaded through to both mesh and tip-pyramid
+      `userData` and added as a new tooltip line, shown for anything that
+      has one (plates and carriers per the request, but also tip racks,
+      trash, etc. for free, with no per-category special-casing needed).
+
+      Verified live: hovering the source plate's base (at a corner
+      outside the well grid, so the raycast doesn't hit a well sitting on
+      top of it) shows "cor_96_wellplate_360uL_Fb"; hovering the tip and
+      plate carriers shows "TIP_CAR_480_A00" and "PLT_CAR_L5AC_A00"
+      respectively -- confirmed both via the tooltip's rendered HTML and
+      a screenshot.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

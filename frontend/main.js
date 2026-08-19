@@ -321,6 +321,27 @@ function addRailLabels(parentGroup, node, deckSurfaceZ) {
   }
 }
 
+// A thin line at every rail boundary (not just every RAIL_LABEL_INTERVAL-th
+// one, unlike the labels above) -- numRails+1 of them, bracketing each
+// 22.5mm-wide rail slot from the leftmost rail's left edge through the
+// rightmost rail's right edge, spanning the deck's full y depth. Sits
+// right on the platform's own top surface (normal depth-testing, unlike
+// the always-on-top label sprites) so a carrier sitting on top of a line
+// correctly occludes the part underneath it.
+function addRailLines(parentGroup, node, deckSurfaceZ) {
+  const numRails = node.num_rails;
+  if (!numRails) return;
+  const sizeY = node.size_y ?? 0;
+  const points = [];
+  for (let rail = 1; rail <= numRails + 1; rail++) {
+    const x = RAIL_X_OFFSET_MM + (rail - 1) * RAIL_WIDTH_MM;
+    points.push(mapPoint(x, 0, deckSurfaceZ + 0.3), mapPoint(x, sizeY, deckSurfaceZ + 0.3));
+  }
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const material = new THREE.LineBasicMaterial({ color: 0x50565f, transparent: true, opacity: 0.6 });
+  parentGroup.add(new THREE.LineSegments(geometry, material));
+}
+
 function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
   const group = new THREE.Group();
   group.name = node.name;
@@ -430,12 +451,20 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
       zOffset = sizeZ / 2;
     }
     mesh.position.set(sizeX / 2, zOffset, -sizeY / 2);
-    mesh.userData = { resourceName: node.name, resourceType: node.type, category: node.category };
+    mesh.userData = {
+      resourceName: node.name,
+      resourceType: node.type,
+      category: node.category,
+      model: node.model,
+    };
     group.add(mesh);
     hoverables.push(mesh);
   }
 
-  if (isDeck) addRailLabels(group, node, deckSurfaceZ);
+  if (isDeck) {
+    addRailLabels(group, node, deckSurfaceZ);
+    addRailLines(group, node, deckSurfaceZ);
+  }
 
   // A tip spot's own box is a near-zero-height placement marker (see
   // events.py's tip_grab_point() docstring for why), and -- easy to miss --
@@ -475,7 +504,12 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm) {
     // like an actual pipette tip's mounting collar facing the rack surface.
     tipPyramid.rotation.x = Math.PI;
     tipPyramid.rotation.y = Math.PI / 4; // diamond-facing orientation, purely cosmetic
-    tipPyramid.userData = { resourceName: node.name, resourceType: node.type, category: node.category };
+    tipPyramid.userData = {
+      resourceName: node.name,
+      resourceType: node.type,
+      category: node.category,
+      model: node.model,
+    };
     group.add(tipPyramid);
     hoverables.push(tipPyramid);
   }
@@ -1174,10 +1208,18 @@ renderer.domElement.addEventListener("pointermove", (event) => {
   raycaster.setFromCamera(pointer, camera);
   const hits = raycaster.intersectObjects(hoverables, false);
   if (hits.length > 0) {
-    const { resourceName, resourceType, category } = hits[0].object.userData;
+    const { resourceName, resourceType, category, model } = hits[0].object.userData;
     tooltipEl.style.display = "block";
     tooltipEl.style.left = `${event.clientX + 14}px`;
     tooltipEl.style.top = `${event.clientY + 14}px`;
+    // Catalog identifier (e.g. "cor_96_wellplate_360uL_Fb",
+    // "TIP_CAR_480_A00") -- `model` is a real PyLabRobot Resource field
+    // (the name of the factory function/constant that built this specific
+    // instance), already present in serialize() output with no scene.py
+    // changes needed. `resourceType` above is the much coarser class name
+    // ("Plate", "TipCarrier"); this is the specific catalog part number a
+    // protocol author would actually recognize.
+    const modelLine = model ? `<div class="model">${model}</div>` : "";
     // Volume line only for wells, and only once we actually know a value
     // (entry.volume starts null until the first "state" -- see
     // resourceIndex.set()'s comment -- so an unstarted protocol just omits
@@ -1193,6 +1235,7 @@ renderer.domElement.addEventListener("pointermove", (event) => {
     tooltipEl.innerHTML =
       `<div class="name">${resourceName}</div>` +
       `<div class="type">${resourceType}${category ? " &middot; " + category : ""}</div>` +
+      modelLine +
       volumeLine;
   } else {
     tooltipEl.style.display = "none";
