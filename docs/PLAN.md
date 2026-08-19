@@ -412,6 +412,60 @@ inconsistent) color from the source plate's and from unused wells.
       from `0c5d42` (barely different from black) to `1a946b` (clearly
       green), while the 0µL one is still exactly `000000`.
 
+## Review round 6 (2026-08-18)
+
+User feedback: wells appeared filled before the dispense animation reached
+them (originally phrased as "before the filling animation happens").
+
+- [x] **Well/tip color changing before the animation arrives.** Root cause:
+      PyLabRobot's tracker fires its state-update callback the moment
+      `LiquidHandler.dispense()`/`aspirate()`/`pick_up_tips()`/`drop_tips()`
+      queues the tracker change -- *before* it even calls this backend (i.e.
+      before `VisualizerBackend`, and therefore the "op" event that drives
+      the gantry animation, runs at all). So the separately-broadcast
+      "state" message routinely reaches the frontend and gets applied
+      before the corresponding "op" event's animation has even started,
+      let alone arrived. Confirmed by reading PyLabRobot's own
+      `VolumeTracker`/`TipTracker` source: `add_liquid`/`remove_liquid`/
+      `remove_tip` all invoke the registered callback immediately, and
+      `LiquidHandler` only calls the backend afterward.
+
+      Fixed by not depending on that message's timing at all for these two
+      categories:
+      - `events.py`'s `channel_ops_event()` now embeds the *resulting*
+        state directly in each channel entry (`resource_has_tip` for
+        pick_up_tips/drop_tips, computed for free since a successful call
+        always empties/fills its target; `resource_volume`/
+        `resource_max_volume` for aspirate/dispense, read from the
+        tracker's `pending_volume` -- not `volume`, since our wrapper runs
+        before `LiquidHandler.commit()` syncs the two).
+      - `visualizer_backend.py`'s `_register_state_callbacks` now skips
+        registering a live callback for `tip_spot`/`well` categories
+        entirely -- their only live-update path is the embedded data above.
+      - `main.js`'s `applyEmbeddedResourceState()` applies that embedded
+        data from `animateChannelOp`'s `onArrive` -- i.e. exactly when the
+        gantry visually arrives, never before.
+
+      **Regression found and fixed while verifying this end-to-end:**
+      skipping the live callback also stopped updating
+      `VisualizerServer._latest_state` (the snapshot sent to *new*
+      connections -- see round 5) for tip_spot/well, so a client connecting
+      after a run had progressed saw stale pre-run state for those two
+      categories instead of what actually happened. Added
+      `VisualizerServer.record_resource_state()`, a cache-only update (no
+      live broadcast) that `visualizer_backend.py` now also calls from the
+      same embedded data, keeping new connections correct without
+      reintroducing the timing race.
+
+      Verified in three ways: (1) an integration test confirmed the
+      embedded values are correct (`resource_volume: 150.0` after
+      aspirating 50µL from a 200µL well) and that zero live "state" events
+      fire for touched tip_spot/well resources during a run; (2) before
+      adding `record_resource_state()`, a fresh connection made *after* a
+      full demo run reproduced the regression exactly (a dispensed-into
+      well stuck showing its stale pre-run black); (3) after adding it, the
+      same scenario showed every well/tip-spot's correct final color.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

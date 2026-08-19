@@ -169,6 +169,24 @@ class VisualizerServer:
     self._latest_state.clear()
     await self.broadcast({"type": "scene", "deck": scene, "num_channels": num_channels})
 
+  def record_resource_state(self, resource_name: str, state: Dict[str, Any]) -> None:
+    """Update the cached "latest known state" for ``resource_name`` *without*
+    broadcasting it live.
+
+    For tip_spot/well resources, ``VisualizerBackend`` delivers live updates
+    via a different, timing-correct path (embedded directly in the relevant
+    "op" event, applied by the frontend when the gantry animation actually
+    arrives -- see ``channel_ops_event()``'s docstring for why) instead of a
+    live state-update callback. That path doesn't otherwise touch
+    :attr:`_latest_state`, so without this, a *new* connection made after
+    some operations have already happened would see those two categories'
+    stale pre-run state (from the one-time initial broadcast) instead of
+    what actually happened -- this keeps the snapshot new connections get
+    in sync without reintroducing the timing race that path exists to avoid.
+    """
+
+    self._latest_state[resource_name] = {"type": "state", "resource": resource_name, "state": state}
+
   def schedule_broadcast(self, event: Dict[str, Any]) -> None:
     """Fire-and-forget variant of :meth:`broadcast` for use from *synchronous*
     callbacks (e.g. ``Resource.register_state_update_callback``), which can't

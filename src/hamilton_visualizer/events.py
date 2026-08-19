@@ -116,6 +116,12 @@ def channel_ops_event(
 ) -> Dict[str, Any]:
   """Build a ``{"type": "op", ...}`` event for a per-channel pipetting call
   (pick_up_tips / drop_tips / aspirate / dispense).
+
+  Each channel entry also embeds the *resulting* tip-presence/volume state
+  of the resource it targets (``resource_has_tip`` or ``resource_volume``/
+  ``resource_max_volume``) -- see the comment above the block that computes
+  them for why this exists instead of relying on the separate live "state"
+  broadcast for these two resource categories.
   """
 
   channels: List[Dict[str, Any]] = []
@@ -142,6 +148,35 @@ def channel_ops_event(
       entry["volume"] = getattr(op, volume_attr)
     if tip is not None:
       entry["tip_type"] = type(tip).__name__
+
+    # Embed the resulting state directly, timed by the frontend's animation
+    # (applied at "arrival," not on receipt) instead of relying on the
+    # separately-broadcast "state" event PyLabRobot's tracker callbacks
+    # produce. That broadcast fires the moment `LiquidHandler` queues the
+    # tracker change -- *before* it even calls this backend -- so by the
+    # time our own event reaches the frontend, the color change has usually
+    # already arrived and been applied too early (visually "the well fills
+    # before the dispense animation gets there"). visualizer_backend.py's
+    # `_register_state_callbacks` deliberately skips live callbacks for
+    # exactly the two categories covered here (tip_spot, well) so this is
+    # the only path driving their color during a live run.
+    if op_name in ("pick_up_tips", "drop_tips"):
+      # No tracker read needed: a successful pick_up_tips always empties the
+      # spot and a successful drop_tips always fills its target: if either
+      # failed, we wouldn't have reached this line (the inner backend call
+      # above would have raised).
+      entry["resource_has_tip"] = op_name == "drop_tips"
+    elif op_name in ("aspirate", "dispense"):
+      tracker = getattr(op.resource, "tracker", None)
+      # `pending_volume`, not `volume`: LiquidHandler queues the tracker
+      # change before calling the backend and only commits it (syncing
+      # `volume` from `pending_volume`) afterwards -- we're still inside
+      # that window, so `pending_volume` is the one that already reflects
+      # this operation's result.
+      if tracker is not None and hasattr(tracker, "pending_volume"):
+        entry["resource_volume"] = tracker.pending_volume
+        entry["resource_max_volume"] = getattr(op.resource, "max_volume", None)
+
     channels.append(entry)
   return {"type": "op", "op": op_name, "channels": channels}
 

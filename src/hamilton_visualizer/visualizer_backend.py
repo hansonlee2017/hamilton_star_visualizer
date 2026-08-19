@@ -101,9 +101,22 @@ class VisualizerBackend(LiquidHandlerBackend):
     await self._inner.stop()
     self.setup_finished = False
 
+  # tip_spot/well changes driven by pick_up_tips/drop_tips/aspirate/dispense
+  # are instead delivered by channel_ops_event() embedding the resulting
+  # state directly in the "op" event -- see its docstring for why: a live
+  # state callback fires the moment LiquidHandler queues the tracker change,
+  # *before* it even calls this backend, so by the time it reaches the
+  # frontend the color change has usually already been applied ahead of the
+  # gantry animation that's supposed to cause it. Skipping the live callback
+  # for just these two categories avoids that race; _broadcast_initial_state
+  # (a direct one-time push, not a callback) still covers their starting
+  # color, and any other resource category still gets live updates normally.
+  _LIVE_CALLBACK_EXCLUDED_CATEGORIES = frozenset({"tip_spot", "well"})
+
   def _register_state_callbacks(self, resource) -> None:
-    """Recursively subscribe to tip-presence/liquid-volume changes so the
-    frontend's static scene stays live (Phase 2)."""
+    """Recursively subscribe to state changes so the frontend's static scene
+    stays live (Phase 2) for everything not covered by embedded op-event
+    data (see ``_LIVE_CALLBACK_EXCLUDED_CATEGORIES`` above)."""
 
     def make_callback(name: str):
       def _on_state_update(state: dict) -> None:
@@ -111,7 +124,8 @@ class VisualizerBackend(LiquidHandlerBackend):
 
       return _on_state_update
 
-    resource.register_state_update_callback(make_callback(resource.name))
+    if resource.category not in self._LIVE_CALLBACK_EXCLUDED_CATEGORIES:
+      resource.register_state_update_callback(make_callback(resource.name))
     for child in resource.children:
       self._register_state_callbacks(child)
 
@@ -129,26 +143,50 @@ class VisualizerBackend(LiquidHandlerBackend):
     for child in resource.children:
       await self._broadcast_initial_state(child)
 
+  def _sync_state_cache(self, event: Dict) -> None:
+    """Fold a channel_ops_event()'s embedded resource_has_tip/resource_volume
+    data back into the server's "latest known state" cache (without
+    broadcasting it live -- see ``VisualizerServer.record_resource_state``'s
+    docstring for why this is needed at all).
+    """
+
+    for entry in event.get("channels", []):
+      if "resource_has_tip" in entry:
+        state = {"tip": None if not entry["resource_has_tip"] else True}
+      elif "resource_volume" in entry:
+        state = {"volume": entry["resource_volume"], "max_volume": entry.get("resource_max_volume")}
+      else:
+        continue
+      self._server.record_resource_state(entry["resource"], state)
+
   # -- pipetting ------------------------------------------------------------
   async def pick_up_tips(self, ops: List[Pickup], use_channels: List[int], **backend_kwargs) -> None:
     await self._inner.pick_up_tips(ops, use_channels, **backend_kwargs)
-    await self._server.broadcast(channel_ops_event("pick_up_tips", ops, use_channels))
+    event = channel_ops_event("pick_up_tips", ops, use_channels)
+    self._sync_state_cache(event)
+    await self._server.broadcast(event)
 
   async def drop_tips(self, ops: List[Drop], use_channels: List[int], **backend_kwargs) -> None:
     await self._inner.drop_tips(ops, use_channels, **backend_kwargs)
-    await self._server.broadcast(channel_ops_event("drop_tips", ops, use_channels))
+    event = channel_ops_event("drop_tips", ops, use_channels)
+    self._sync_state_cache(event)
+    await self._server.broadcast(event)
 
   async def aspirate(
     self, ops: List[SingleChannelAspiration], use_channels: List[int], **backend_kwargs
   ) -> None:
     await self._inner.aspirate(ops, use_channels, **backend_kwargs)
-    await self._server.broadcast(channel_ops_event("aspirate", ops, use_channels, volume_attr="volume"))
+    event = channel_ops_event("aspirate", ops, use_channels, volume_attr="volume")
+    self._sync_state_cache(event)
+    await self._server.broadcast(event)
 
   async def dispense(
     self, ops: List[SingleChannelDispense], use_channels: List[int], **backend_kwargs
   ) -> None:
     await self._inner.dispense(ops, use_channels, **backend_kwargs)
-    await self._server.broadcast(channel_ops_event("dispense", ops, use_channels, volume_attr="volume"))
+    event = channel_ops_event("dispense", ops, use_channels, volume_attr="volume")
+    self._sync_state_cache(event)
+    await self._server.broadcast(event)
 
   # -- 96 head (forwarded for interface completeness; not animated in v1) --
   async def pick_up_tips96(self, pickup: PickupTipRack, **backend_kwargs) -> None:

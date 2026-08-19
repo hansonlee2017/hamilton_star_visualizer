@@ -351,6 +351,23 @@ function loadScene(deckNode) {
 // ---------------------------------------------------------------------------
 // Live state updates (tip presence / liquid volume) -- Phase 2
 // ---------------------------------------------------------------------------
+
+// Shared with the op-event-embedded path below (applyEmbeddedResourceState)
+// so both ways a color can be driven -- the generic "state" broadcast (used
+// for the initial sync burst and for anything not covered by a gantry op)
+// and the timing-correct embedded data (used for live pick_up_tips/
+// drop_tips/aspirate/dispense) -- compute it identically.
+function volumeColor(volume, maxVolume) {
+  const rawFrac = THREE.MathUtils.clamp((volume ?? 0) / (maxVolume || 1), 0, 1);
+  // sqrt rather than the raw fraction: a linear scale makes small-but-real
+  // volumes (e.g. a 50uL dispense into a 360uL well, 14%) look almost
+  // identical to genuinely empty (0%), which is what a well right after a
+  // dispense typically looks like right next to a well that's never been
+  // touched. sqrt boosts the low end while keeping 0 at 0, 1 at 1, and the
+  // ordering monotonic, so "more liquid" still always reads as "brighter."
+  return VOLUME_EMPTY_COLOR.clone().lerp(VOLUME_FULL_COLOR, Math.sqrt(rawFrac));
+}
+
 function applyState(resourceName, state) {
   const entry = resourceIndex.get(resourceName);
   if (!entry) return;
@@ -358,20 +375,27 @@ function applyState(resourceName, state) {
   if (Object.prototype.hasOwnProperty.call(state, "tip")) {
     const hasTip = state.tip !== null && state.tip !== undefined;
     if (entry.tipPyramid) entry.tipPyramid.material.color.setHex(hasTip ? TIP_PRESENT_COLOR : EMPTY_COLOR);
-  } else if (!entry.mesh) {
-    return;
-  } else if (Object.prototype.hasOwnProperty.call(state, "volume")) {
-    const maxVolume = state.max_volume || 1;
-    const rawFrac = THREE.MathUtils.clamp((state.volume ?? 0) / maxVolume, 0, 1);
-    // sqrt rather than the raw fraction: a linear scale makes small-but-real
-    // volumes (e.g. a 50uL dispense into a 360uL well, 14%) look almost
-    // identical to genuinely empty (0%), which is what a well right after a
-    // dispense typically looks like right next to a well that's never been
-    // touched. sqrt boosts the low end while keeping 0 at 0, 1 at 1, and the
-    // ordering monotonic, so "more liquid" still always reads as "brighter."
-    const frac = Math.sqrt(rawFrac);
-    const c = VOLUME_EMPTY_COLOR.clone().lerp(VOLUME_FULL_COLOR, frac);
-    entry.mesh.material.color.copy(c);
+  } else if (Object.prototype.hasOwnProperty.call(state, "volume") && entry.mesh) {
+    entry.mesh.material.color.copy(volumeColor(state.volume, state.max_volume));
+  }
+}
+
+// Applies the resulting tip-presence/volume state that channel_ops_event()
+// embeds directly in an "op" event's channel entry, timed by the caller
+// (animateChannelOp's onArrive, i.e. exactly when the gantry visually
+// arrives) rather than by whenever a separate "state" broadcast happens to
+// show up -- see events.py's channel_ops_event() docstring for why the
+// latter can't be relied on for timing. A no-op for resources without the
+// relevant mesh (e.g. dropping a tip into a Trash, which has no tipPyramid).
+function applyEmbeddedResourceState(entry) {
+  const target = resourceIndex.get(entry.resource);
+  if (!target) return;
+  if (Object.prototype.hasOwnProperty.call(entry, "resource_has_tip")) {
+    if (target.tipPyramid) {
+      target.tipPyramid.material.color.setHex(entry.resource_has_tip ? TIP_PRESENT_COLOR : EMPTY_COLOR);
+    }
+  } else if (Object.prototype.hasOwnProperty.call(entry, "resource_volume") && target.mesh) {
+    target.mesh.material.color.copy(volumeColor(entry.resource_volume, entry.resource_max_volume));
   }
 }
 
@@ -600,13 +624,23 @@ function handleOpEvent(msg) {
   switch (msg.op) {
     case "pick_up_tips":
       for (const entry of msg.channels) {
-        animateChannelOp(entry, { onArrive: () => channels[entry.channel]?.setTip(true) });
+        animateChannelOp(entry, {
+          onArrive: () => {
+            channels[entry.channel]?.setTip(true);
+            applyEmbeddedResourceState(entry);
+          },
+        });
       }
       logEvent("pick_up_tips", msg.channels.map((c) => `p${c.channel}:${c.resource}`).join(", "));
       break;
     case "drop_tips":
       for (const entry of msg.channels) {
-        animateChannelOp(entry, { onArrive: () => channels[entry.channel]?.setTip(false) });
+        animateChannelOp(entry, {
+          onArrive: () => {
+            channels[entry.channel]?.setTip(false);
+            applyEmbeddedResourceState(entry);
+          },
+        });
       }
       logEvent("drop_tips", msg.channels.map((c) => `p${c.channel}:${c.resource}`).join(", "));
       break;
@@ -620,6 +654,11 @@ function handleOpEvent(msg) {
           onArrive: () => {
             channels[entry.channel]?.pulse();
             channels[entry.channel]?.flowPulse(flowDirection);
+            // Apply the real color *before* flashing -- flashResource()
+            // captures whatever color is current as what to revert to, so
+            // flashing first would revert back to the stale pre-dispense
+            // shade instead of the one we just set.
+            applyEmbeddedResourceState(entry);
             flashResource(entry.resource);
           },
         });
