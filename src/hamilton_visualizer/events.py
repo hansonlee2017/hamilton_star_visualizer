@@ -51,6 +51,47 @@ def tip_grab_point(tip_spot: TipSpot, tip: Tip) -> Dict[str, float]:
   return {"x": round(loc.x, 2), "y": round(loc.y, 2), "z": round(z, 2)}
 
 
+def liquid_surface_point(resource: Resource, liquid_height: Optional[float]) -> Dict[str, float]:
+  """Absolute (x, y, z) of the liquid surface a channel would aspirate from
+  or dispense into ``resource`` (a well/container), in deck mm.
+
+  Mirrors ``STARBackend.aspirate``'s own formula for the z --
+  ``well_bottom + material_z_thickness + liquid_height`` -- rather than
+  ``resource_point()``'s generic top-anchor, which stops at the well's
+  *opening* instead of the liquid.
+
+  If ``liquid_height`` isn't given (the common case -- it's an optional,
+  explicit override on the PyLabRobot op), it's derived from the well's
+  *currently tracked* volume via ``compute_height_from_volume()`` when the
+  resource supports it, so the depth reflects reality and drops as a well
+  drains. Falls back to the well bottom otherwise, matching what
+  ``STARBackend`` itself does when liquid_height is unset.
+
+  Note: this reads the tracker *synchronously within the same op* that's
+  changing it, before ``LiquidHandler`` commits the pending change -- so in
+  practice this ends up reading the volume as it was *before* this
+  operation, for both aspirate and dispense. That's a reasonable
+  approximation (roughly "where the surface was when the tip arrived") but
+  not exact; a substitute for real motion planning this is not.
+  """
+
+  loc = resource.get_absolute_location(x="c", y="c", z="b")
+  bottom_z = loc.z + (getattr(resource, "material_z_thickness", None) or 0)
+
+  if liquid_height is None:
+    liquid_height = 0.0
+    tracker = getattr(resource, "tracker", None)
+    supports_hv = getattr(resource, "supports_compute_height_volume_functions", None)
+    if tracker is not None and callable(supports_hv) and supports_hv():
+      try:
+        liquid_height = resource.compute_height_from_volume(tracker.volume)
+      except Exception:  # noqa: BLE001 - fall back to well bottom on any surprise
+        liquid_height = 0.0
+
+  z = bottom_z + liquid_height
+  return {"x": round(loc.x, 2), "y": round(loc.y, 2), "z": round(z, 2)}
+
+
 def channel_ops_event(
   op_name: str,
   ops: Sequence[Any],
@@ -66,11 +107,14 @@ def channel_ops_event(
   for op, channel in zip(ops, use_channels):
     tip = getattr(op, "tip", None)
     # pick_up_tips/drop_tips against a TipSpot (not e.g. a Trash) need the
-    # tip-length-aware grab point -- see tip_grab_point() -- everything else
-    # (aspirate/dispense wells, drop_tips into a Trash) uses the generic
-    # top-anchor approximation.
+    # tip-length-aware grab point -- see tip_grab_point(). aspirate/dispense
+    # need the liquid-surface-aware point -- see liquid_surface_point().
+    # Everything else (drop_tips into a Trash, 96-head via resource_event)
+    # uses the generic top-anchor approximation.
     if op_name in ("pick_up_tips", "drop_tips") and tip is not None and isinstance(op.resource, TipSpot):
       point = tip_grab_point(op.resource, tip)
+    elif op_name in ("aspirate", "dispense"):
+      point = liquid_surface_point(op.resource, getattr(op, "liquid_height", None))
     else:
       point = resource_point(op.resource)
     entry: Dict[str, Any] = {"channel": channel, "resource": op.resource.name, **point}

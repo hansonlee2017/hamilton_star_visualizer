@@ -329,6 +329,32 @@ let restZ = 350;
 const gantryGroup = new THREE.Group();
 scene.add(gantryGroup);
 
+// A small repeating-stripe gradient, scrolled via `map.offset.y` to read as
+// liquid flowing up (aspirate) or down (dispense) through the tip. Built
+// once on a canvas -- cheap, no external assets, no shader code.
+function createFlowTexture() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 8;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  gradient.addColorStop(0.0, "#bfeaff");
+  gradient.addColorStop(0.25, "#2f8fc4");
+  gradient.addColorStop(0.5, "#bfeaff");
+  gradient.addColorStop(0.75, "#2f8fc4");
+  gradient.addColorStop(1.0, "#bfeaff");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(1, 3);
+  return texture;
+}
+const FLOW_TEXTURE = createFlowTexture();
+const FLOW_PULSE_MS = 550;
+
 class Channel {
   constructor(index) {
     this.index = index;
@@ -357,6 +383,10 @@ class Channel {
     this.tipMesh.visible = false;
     this.group.add(this.tipMesh);
 
+    // Own clone so this channel's scroll offset can't fight another
+    // channel's concurrent (and possibly opposite-direction) flowPulse().
+    this.flowTexture = FLOW_TEXTURE.clone();
+
     gantryGroup.add(this.group);
     this.applyPosition();
   }
@@ -375,6 +405,30 @@ class Channel {
   pulse() {
     this.body.material.color.copy(PULSE_COLOR);
     setTimeout(() => this.body.material.color.setHex(0x9aa0a8), 250);
+  }
+
+  // direction: +1 to scroll "up" (aspirate -- liquid entering the tip),
+  // -1 to scroll "down" (dispense -- liquid leaving it).
+  flowPulse(direction) {
+    const material = this.tipMesh.material;
+    const restoreColor = material.color.clone();
+    material.map = this.flowTexture;
+    material.color.setHex(0xffffff); // let the texture's own colors show through
+    material.needsUpdate = true;
+
+    const start = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - start) / FLOW_PULSE_MS);
+      this.flowTexture.offset.y = direction * t * 2; // a couple of texture repeats' worth of scroll
+      if (t < 1) {
+        requestAnimationFrame(step);
+      } else {
+        material.map = null;
+        material.color.copy(restoreColor);
+        material.needsUpdate = true;
+      }
+    };
+    requestAnimationFrame(step);
   }
 
   enqueue(target, duration) {
@@ -463,11 +517,15 @@ function handleOpEvent(msg) {
       logEvent("drop_tips", msg.channels.map((c) => `p${c.channel}:${c.resource}`).join(", "));
       break;
     case "aspirate":
-    case "dispense":
+    case "dispense": {
+      // Liquid flows "up" into the tip on aspirate, "down" out of it on
+      // dispense -- see Channel.flowPulse().
+      const flowDirection = msg.op === "aspirate" ? 1 : -1;
       for (const entry of msg.channels) {
         animateChannelOp(entry, {
           onArrive: () => {
             channels[entry.channel]?.pulse();
+            channels[entry.channel]?.flowPulse(flowDirection);
             flashResource(entry.resource);
           },
         });
@@ -477,6 +535,7 @@ function handleOpEvent(msg) {
         msg.channels.map((c) => `p${c.channel}:${c.resource} (${c.volume}µL)`).join(", ")
       );
       break;
+    }
     default:
       // 96-head / resource-move / manual-jog events: not animated in v1, but
       // still worth surfacing in the log so the panel reflects everything

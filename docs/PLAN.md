@@ -205,13 +205,41 @@ switch the demo from `drop_tips` to `discard_tips`, and an aspirate/dispense
       interception point already covers it — the event log still labels it
       `drop_tips` (that's the literal backend call), but the target resource
       correctly shows as `trash` instead of a tip-rack spot.
-- [ ] **Aspirate/dispense channel z.** Currently uses the well's generic
-      top-anchor (`resource_point()`), i.e. the channel stops right at the
-      well opening rather than actually dipping into the liquid. Real
-      options and tradeoffs are being discussed with the user before
-      picking one — see chat.
-- [ ] **Aspirate/dispense flow animation.** Options being discussed with
-      the user before implementing — see chat.
+- [x] **Aspirate/dispense channel z.** Added `events.py`'s
+      `liquid_surface_point()`, mirroring `STARBackend.aspirate`'s own
+      `well_bottom + material_z_thickness + liquid_height` formula. Respects
+      an explicit `op.liquid_height` when the protocol sets one; otherwise
+      derives it from the well's *currently tracked* volume via
+      `compute_height_from_volume()`, falling back to the well bottom if the
+      resource doesn't support that. Numerically verified against a real
+      well (200µL in a 360µL well: old top-anchor z=196.82 at the opening →
+      new z=192.84, correctly below the surface and above the 186.15 bottom).
+      Known simplification: because `LiquidHandler` queues the tracker
+      change and only commits it *after* `backend.aspirate`/`dispense`
+      returns, reading `tracker.volume` at broadcast time ends up reading
+      the *pre-operation* level for both ops (not post-aspirate/dispense) --
+      documented in the function's docstring, not exact but a reasonable
+      "where the surface was when the tip arrived" approximation.
+- [x] **Aspirate/dispense flow animation.** `Channel.flowPulse(direction)`
+      in `main.js`: a small canvas-generated repeating-stripe gradient
+      texture (`createFlowTexture()`), applied as the tip pyramid's `map`
+      and scrolled via `texture.offset.y` for ~550ms -- up for aspirate,
+      down for dispense -- then removed to restore the plain tip color.
+      Each channel owns its own texture *clone* so two channels animating
+      concurrently (the common case -- all 8 fire together) don't fight
+      over a shared offset. Verified live: polled a channel's tip material
+      mid-replay and confirmed `material.map` was set with a real,
+      advancing `offset.y`.
+
+  **Bug found and fixed while verifying this:** the new
+  `_broadcast_initial_state()` (see above) walks every resource, including
+  `Trash`, whose `max_volume` is `float("inf")` by design. Python's
+  `json.dumps` emits that as the bare token `Infinity`, which is *not*
+  valid JSON -- the browser's `JSON.parse` threw a `SyntaxError` on every
+  message containing it, silently breaking state sync from that point on.
+  Added `server.py`'s `_json_safe()`, applied to every outgoing message in
+  `_send()`, which recursively replaces non-finite floats (`inf`/`-inf`/
+  `nan`) with `null`.
 
 ## Stretch / explicitly deferred (not v1)
 

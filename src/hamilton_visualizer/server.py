@@ -42,6 +42,24 @@ MAX_REPLAY_GAP = 2.0
 MAX_EVENT_HISTORY = 5000
 
 
+def _json_safe(value: Any) -> Any:
+  """Recursively replace non-finite floats (``inf``/``-inf``/``nan``) with
+  ``None``. Python's ``json.dumps`` happily emits these as the bare tokens
+  ``Infinity``/``-Infinity``/``NaN`` (a non-standard extension), which is
+  *not* valid JSON -- e.g. a ``Trash`` resource's ``max_volume`` is
+  ``float("inf")`` by design, and shipping that verbatim breaks
+  ``JSON.parse`` in the browser for every message that resource appears in.
+  """
+
+  if isinstance(value, float):
+    return value if value == value and value not in (float("inf"), float("-inf")) else None
+  if isinstance(value, dict):
+    return {k: _json_safe(v) for k, v in value.items()}
+  if isinstance(value, list):
+    return [_json_safe(v) for v in value]
+  return value
+
+
 class VisualizerServer:
   """Owns the websocket connections and the latest scene graph."""
 
@@ -205,7 +223,7 @@ class VisualizerServer:
     # still trickling in while someone replays), and concurrent writes to
     # one websocket are not safe to interleave.
     lock = self._send_locks.get(websocket)
-    message = json.dumps(event)
+    message = json.dumps(_json_safe(event))
     if lock is None:
       await websocket.send_text(message)
     else:
