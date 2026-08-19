@@ -624,11 +624,13 @@ class Channel {
   // than their ~1.6s animation takes to play out, which happens routinely):
   // a fixed-delay timer drifts out of sync with where the channel actually
   // visually is, while this fires exactly on arrival regardless of backup.
-  // `target.x`/`target.y` may be `null`, meaning "stay at whatever x/y this
-  // leg actually starts from" -- used for the rise-to-safe-height leg,
-  // which must not move horizontally. `target.z` may instead be a function
+  // `target.x`/`target.y`/`target.z` may each be `null`, meaning "stay at
+  // whatever this leg actually starts from on that axis" -- used for the
+  // rise-to-safe-height leg (x/y must not move horizontally) and for
+  // nudge_channel ops that only change one of x/y (see handleOpEvent's
+  // "nudge_channel" case). `target.z` may instead be a function
   // (`() => number`) -- used for the descend/hold legs' tip-length-aware
-  // depth (see animateChannelOp). Neither can just be resolved to a value
+  // depth (see animateChannelOp). None of these can just be resolved to a value
   // at enqueue time: since ops routinely arrive faster than their ~1.6s
   // animation plays out, the queue backs up, and a value captured now can
   // be stale by the time this leg actually starts -- e.g. still the
@@ -651,6 +653,7 @@ class Channel {
         this.current.from = { ...this.pos };
         if (this.current.target.x === null) this.current.target.x = this.current.from.x;
         if (this.current.target.y === null) this.current.target.y = this.current.from.y;
+        if (this.current.target.z === null) this.current.target.z = this.current.from.z;
         if (typeof this.current.target.z === "function") this.current.target.z = this.current.target.z();
       }
     }
@@ -782,6 +785,23 @@ function handleOpEvent(msg) {
       logEvent(
         msg.op,
         msg.channels.map((c) => `p${c.channel}:${c.resource} (${c.volume}µL)`).join(", ")
+      );
+      break;
+    }
+    case "nudge_channel": {
+      // VisualizerBackend.nudge_channel(): a purely cosmetic reposition
+      // (real gantry motion planning that has no PLR-level command of its
+      // own -- see that method's docstring), not a pipetting op, so no
+      // rise/descend/hold structure: just glide to (x, y) at rest height.
+      // x/y omitted (null) means "leave this axis where it is" -- see
+      // enqueue()'s docstring.
+      const ch = channels[msg.channel];
+      if (ch) {
+        ch.enqueue({ x: msg.x ?? null, y: msg.y ?? null, z: restZ }, scaled(TRAVEL_MS));
+      }
+      logEvent(
+        "nudge_channel",
+        `p${msg.channel} -> (${msg.x?.toFixed(1) ?? "-"}, ${msg.y?.toFixed(1) ?? "-"})`
       );
       break;
     }

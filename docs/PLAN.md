@@ -612,6 +612,101 @@ rack's single blue base.
       around and between the wells on both plates, matching the tip
       rack's blue-tray look.
 
+## Review round 9 (2026-08-18)
+
+User feedback: the cherry-picking demo (added this round, see below) didn't
+match how a real Hamilton STAR actually moves -- all 8 channels are bolted
+to one arm with a single x motor, so they're always at the same x; only y
+(and z, for whichever channels are actually pipetting) can differ per
+channel. The original demo's scattered dispense moved all 8 channels to
+independent (x, y) targets simultaneously, which isn't physically possible.
+Asked for a helper function to plan real, reachable gantry motion, and
+asked clarifying questions before implementing.
+
+- [x] **New demo: `examples/cherry_pick_demo.py`.** Aspirates a full
+      column (`A1:H1`) from the source plate, then dispenses into 8
+      hand-picked destination wells chosen to read as a smiley face (2
+      eyes + a 6-point mouth curve) -- added before the gantry-realism
+      request below, as a starting point.
+- [x] **New library module: `src/hamilton_visualizer/gantry.py`.** Added
+      as a reusable helper (not demo-local -- confirmed with the user:
+      "a real Hamilton can't move channels to independent x positions" is
+      a hardware fact, not a fact about this one demo). Core piece is
+      `plan_gantry_passes()`: turns "channel i eventually needs resource
+      R_i" into a sequence of `GantryPass`es, one per distinct x
+      (ascending), each carrying which channel(s) actually have a target
+      there and the minimal y-nudges every other loaded channel needs to
+      stay clear (per the user's answer: "if the channels are in the way
+      ..., move them on Y to maintain >= 9mm center to center distance").
+      Solved with a two-pass algorithm (see the module's own docstring for
+      the change-of-variable trick that turns "decrease by >= pitch per
+      step" into plain non-increasing, solved by one forward and one
+      backward propagation pass).
+
+      **First version had a real bug, not just a naive one:** an initial
+      single-pass clamp raised spuriously whenever an idle channel's
+      *stale* preferred y (from a different, already-visited plate/site --
+      e.g. still holding its post-aspirate source-plate position while a
+      much-later dispense pass needs it near the destination plate's very
+      different y range) was tighter than a downstream fixed target
+      needed, because the forward sweep locked in "too low" before ever
+      seeing the conflict. Fixed by reformulating as the two-pass
+      forward/backward propagation described above, verified by hand
+      against a real conflicting case (channel 0/1 needing to jump ~70mm
+      from the source plate's y range to the destination plate's) before
+      moving on.
+
+      **Second, separate issue found via the same verification:** with a
+      straightforward "channel i dispenses to smiley well i" mapping,
+      channels 1 and 6 (assigned to `C8`/`G8`, which share column 8) are 5
+      channel-slots apart but their rows are only 4 apart -- physically
+      unreachable in one simultaneous move, confirmed by hand (`(6-1) *
+      9mm = 45mm` needed vs. `36mm` actually available). Initially fixed
+      by hand-picking a conflict-free channel-to-well assignment, but the
+      user then corrected the underlying design: rather than solving for
+      one global simultaneous arrangement, real hardware (and the user's
+      explicit algorithm) just falls back to visiting such channels
+      **one at a time, smallest channel index first**, when a column's
+      channels can't all be reached together. Rewrote
+      `plan_gantry_passes()` around that: for each column, try resolving
+      all of that column's channels as fixed simultaneously; if
+      `_resolve_ys` raises (infeasible), fall back to one stop per
+      channel instead, in ascending index order -- reusing the same
+      solver either way, since a lone fixed channel can never conflict
+      with itself. This also meant the original, narrative-friendly
+      channel-to-well assignment (`C5, C8, F4, G5, G6, G7, G8, F9`, no
+      hand-reordering needed) just works.
+- [x] **`VisualizerBackend.nudge_channel()`.** A purely cosmetic
+      channel reposition (broadcasts directly, skipping `self._inner`
+      entirely) for `plan_gantry_passes()`'s idle-channel nudges -- there's
+      no PLR-level command for "get out of the way" (real firmware
+      handles this internally as part of a command's own motion planning,
+      not as something a protocol issues), and the existing hardware
+      passthroughs (`move_channel_x`/`move_channel_y`) aren't usable here
+      anyway since `LiquidHandlerChatterboxBackend` doesn't implement them
+      (raises `NotImplementedError` -- confirmed directly against its
+      source).
+- [x] **Frontend: `nudge_channel` op + `target.z === null` support.**
+      Added a `"nudge_channel"` case to `handleOpEvent()` -- a plain glide
+      to `(x, y)` at rest height, no rise/descend/hold structure, since
+      it's never touching labware. Also extended `Channel.update()`'s
+      lazy-resolution handling (`target.x`/`target.y === null` already
+      meant "resolve at leg start") to cover `target.z === null` too, for
+      symmetry and because a nudge might only specify one axis.
+
+      Verified live: recorded all 8 channels' world x every ~80ms across
+      a full run -- the vast majority of samples show all 8 sharing
+      exactly one x value, with mismatches confined to the brief windows
+      *during* an animated move (expected, since channels glide rather
+      than teleport). The event log shows the exact expected sequence at
+      column 8: `dispense p1:dest_plate_well_C8` (channel 1 alone), then
+      seven `nudge_channel` calls dragging every other channel to that
+      same x, then `dispense p6:dest_plate_well_G8` (channel 6 alone) --
+      i.e. real column-by-column, smallest-index-first motion, not a
+      simultaneous scattered jump. A screenshot of the finished run shows
+      the same recognizable smiley face as before, produced this time by
+      physically-plausible motion.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

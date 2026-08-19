@@ -82,11 +82,13 @@ stretch" section for a durable, capture-to-file version).
 
 ```
 docs/                              design doc + phased plan
-src/hamilton_visualizer/           server.py, visualizer_backend.py, scene.py, events.py
+src/hamilton_visualizer/           server.py, visualizer_backend.py, scene.py,
+                                    events.py, gantry.py (real-gantry-motion planning)
 frontend/                          index.html, main.js, vendor/ (three.js, OrbitControls)
 examples/demo_protocol.py          runnable, hardware-free demo
-examples/cherry_pick_demo.py       cherry-picking demo: 8 channels dispense
-                                    independently onto a smiley-face pattern
+examples/cherry_pick_demo.py       cherry-picking demo: dispenses column-by-column
+                                    onto a smiley-face pattern, the way a real
+                                    Hamilton STAR's shared-x gantry actually would
 ```
 
 ## Development

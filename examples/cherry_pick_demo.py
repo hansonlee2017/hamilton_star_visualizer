@@ -1,13 +1,17 @@
-"""Cherry-picking demo: aspirate a column of the source plate, then have each
-channel dispense independently onto a hand-picked "smiley face" pattern on
-the destination plate.
+"""Cherry-picking demo: aspirate a column of the source plate, then dispense
+onto a hand-picked "smiley face" pattern on the destination plate --
+column by column, the way a real Hamilton STAR actually would.
 
-Unlike ``demo_protocol.py`` (which moves a whole column to the matching
-column, so every channel just shifts sideways together), the 8 destination
-wells here aren't a straight row or column -- each channel has to travel to
-its own, differently-offset target. That's the point of the demo: it
-exercises the per-channel independent x/y animation (see frontend/main.js's
-``Channel`` class) instead of the channels moving in lockstep.
+The smiley's 8 wells span 6 different columns, and a real instrument's 8
+channels are all bolted to one arm with a single x motor: they can't be at
+6 different x's at once. ``hamilton_visualizer.gantry.plan_gantry_passes()``
+turns "channel i eventually dispenses into well W_i" into a sequence of
+real, reachable arm stops -- one per distinct x -- moving only the
+channel(s) with a well at that stop, and nudging any other loaded channel
+just far enough on y to stay >= CHANNEL_PITCH_MM from whoever's working
+(see that module's docstring for the physical reasoning). Contrast this
+with the aspirate step below, which *is* a single simultaneous op, exactly
+because all 8 source wells share one column (one x) to begin with.
 
 Run it with:
 
@@ -31,6 +35,7 @@ from pylabrobot.resources import (
 )
 
 from hamilton_visualizer import VisualizerBackend, VisualizerServer
+from hamilton_visualizer.gantry import plan_gantry_passes
 
 # 2 eyes + a 6-point mouth curve (corners turned up, bottom flat), chosen to
 # read as a smiley face on the destination plate's 8-row (A-H) x 12-column
@@ -84,15 +89,33 @@ async def main() -> None:
   await lh.pick_up_tips(tip_rack["A1:H1"])
   await asyncio.sleep(0.5)
 
-  # One aspirate: each of the 8 channels pulls from its own row of column 1.
+  # One aspirate: all 8 source wells share column 1's x, so a real Hamilton
+  # reaches them in a single simultaneous pass too -- each channel just
+  # pulls from its own row.
   await lh.aspirate(source_wells, vols=[40.0] * 8)
   await asyncio.sleep(0.5)
 
-  # One dispense: each channel independently travels to its own smiley-face
-  # target well instead of the channels shifting sideways together.
-  await lh.dispense(dest_wells, vols=[40.0] * 8)
-  await asyncio.sleep(0.5)
+  # The smiley targets are scattered across 6 columns, so the dispense
+  # can't be one simultaneous op -- plan_gantry_passes() breaks it into one
+  # arm stop per column, in order, moving only the channel(s) that actually
+  # have a well there and nudging any others just far enough to stay clear.
+  # `initial_y` is where the aspirate above actually left each channel (its
+  # own source row), so a channel isn't nudged at all until something later
+  # genuinely needs the room.
+  dispense_targets = {i: well for i, well in enumerate(dest_wells)}
+  initial_y = {i: well.get_absolute_location(x="c", y="c", z="c").y for i, well in enumerate(source_wells)}
+  for gantry_pass in plan_gantry_passes(dispense_targets, initial_y=initial_y):
+    for channel, y in gantry_pass.idle_moves.items():
+      await backend.nudge_channel(channel, x=gantry_pass.x, y=y)
+    active_channels = list(gantry_pass.targets.keys())
+    await lh.dispense(
+      list(gantry_pass.targets.values()),
+      use_channels=active_channels,
+      vols=[40.0] * len(active_channels),
+    )
+    await asyncio.sleep(0.3)
 
+  await asyncio.sleep(0.5)
   await lh.discard_tips()
 
   print("Cherry-picking demo finished. Leaving the server up -- Ctrl+C to exit.")
