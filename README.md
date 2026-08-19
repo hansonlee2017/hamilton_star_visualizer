@@ -81,10 +81,12 @@ stretch" section for a durable, capture-to-file version).
 ## Project layout
 
 ```
-docs/                       design doc + phased plan
-src/hamilton_visualizer/    server.py, visualizer_backend.py, scene.py, events.py
-frontend/                   index.html, main.js, vendor/ (three.js, OrbitControls)
-examples/demo_protocol.py   runnable, hardware-free demo
+docs/                              design doc + phased plan
+src/hamilton_visualizer/           server.py, visualizer_backend.py, scene.py, events.py
+frontend/                          index.html, main.js, vendor/ (three.js, OrbitControls)
+examples/demo_protocol.py          runnable, hardware-free demo
+examples/cherry_pick_demo.py       cherry-picking demo: 8 channels dispense
+                                    independently onto a smiley-face pattern
 ```
 
 ## Development
