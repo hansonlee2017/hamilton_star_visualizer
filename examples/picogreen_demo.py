@@ -6,16 +6,18 @@ Deck layout (see the rails= values below for exact positions):
   - 24 unknown samples in columns 1-3 of a 96-well PCR plate (8 rows x 3
     columns).
   - An 8-point 2-fold dilution series, prepared from a 100 ng/uL DNA stock
-    and a TE diluent (each its own 1.5mL Eppendorf tube carrier), directly
+    and a TE diluent (site 7 and site 8 of one 32-tube carrier), directly
     into column 12 of that *same* PCR plate -- rows A-G hold the dilution
     series (A neat, each subsequent well half the concentration of the one
     before it), row H is left as pure diluent (the blank).
   - A Corning 360uL flat-bottom assay plate, empty until the transfers
     below fill it.
-  - A 60mL Hamilton reservoir holding PicoGreen working solution.
-  - Three tip rack sizes (50/300/1000uL) -- see ``tip_rack_for_volume()``:
-    a real protocol picks the smallest tip that comfortably holds a given
-    transfer, not one size for everything.
+  - A 60mL Hamilton reservoir (site 2 of its carrier) holding PicoGreen
+    working solution.
+  - Two tip rack sizes (50/300uL) -- see ``tip_rack_for_volume()``: a real
+    protocol picks the smallest tip that comfortably holds a given
+    transfer, not one size for everything (this protocol's volumes -
+    5-200uL - never call for a 1000uL tip).
 
 Protocol:
   1. Prepare the standard curve. Diluent goes into every well but the top
@@ -33,14 +35,16 @@ Protocol:
      time (planGantryPasses() drags any tip-loaded channel to wherever the
      arm goes, whether or not this specific call targets it).
   2. For each of the 4 columns that matter (sample columns 1-3, standard
-     column 12), an 8-channel transfer moves 5uL from the PCR plate into
-     the matching column of the assay plate.
-  3. For those same 4 columns, an 8-channel transfer adds 195uL of
-     PicoGreen working solution from the reservoir on top -- all 8
+     column 12), an 8-channel transfer adds 195uL of PicoGreen working
+     solution from the reservoir into the assay plate first -- all 8
      channels aspirate from the one reservoir simultaneously
      (``spread="wide"``, PyLabRobot's own idiom for multiple channels
      sharing a single large container; see ``LiquidHandler.aspirate()``'s
      docstring), rather than 8 separate single-channel round trips.
+  3. For those same 4 columns, an 8-channel transfer then moves 5uL from
+     the PCR plate on top -- the larger-volume reagent goes in first, so
+     the small sample volume lands in (and mixes into) a substantial
+     existing volume rather than the other way around.
 
 Every transfer here is an ordinary ``LiquidHandler`` call -- no gantry-
 planning code in this file at all; see ``frontend/main.js``'s
@@ -71,7 +75,6 @@ from pylabrobot.resources import (
   hamilton_1_trough_60mL_Vb,
   hamilton_96_tiprack_50uL_filter,
   hamilton_96_tiprack_300uL_filter,
-  hamilton_96_tiprack_1000uL_filter,
   hamilton_tube_carrier_32_a00_insert_eppendorf_1_5mL,
 )
 
@@ -93,16 +96,14 @@ async def main() -> None:
   # Every tip size this protocol needs lives on one carrier -- pick the
   # smallest tip that comfortably holds a given transfer (tip_rack_for_
   # volume() below), the same way a real protocol would, rather than
-  # reaching for one size for everything. Placed at rails=9 (each carrier's
-  # width below determines how far the *next* one has to start).
+  # reaching for one size for everything. No 1000uL rack -- nothing here
+  # ever aspirates/dispenses more than 200uL, so it would just sit unused.
   tip_carrier = TIP_CAR_480_A00(name="tip_carrier_1")
   tip_rack_50uL = hamilton_96_tiprack_50uL_filter(name="tip_rack_50uL")
   tip_rack_300uL = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL")
-  tip_rack_1000uL = hamilton_96_tiprack_1000uL_filter(name="tip_rack_1000uL")
   tip_carrier[0] = tip_rack_50uL
   tip_carrier[1] = tip_rack_300uL
-  tip_carrier[2] = tip_rack_1000uL
-  deck.assign_child_resource(tip_carrier, rails=9)
+  deck.assign_child_resource(tip_carrier, rails=1)
 
   # Both the PCR sample plate and the Corning assay plate live on the same
   # carrier -- mirrors how demo_protocol.py/cherry_pick_demo.py pair a
@@ -112,25 +113,24 @@ async def main() -> None:
   assay_plate = cor_96_wellplate_360uL_Fb(name="assay_plate")
   plate_carrier[0] = sample_plate
   plate_carrier[1] = assay_plate
-  deck.assign_child_resource(plate_carrier, rails=15)
+  deck.assign_child_resource(plate_carrier, rails=7)
 
+  # Site 2 (1-indexed -- carrier[1] in PyLabRobot's own 0-indexed API) of
+  # its carrier, not a deck rail -- "slot" here means a site *within* the
+  # carrier.
   reservoir_carrier = Trough_CAR_5R60_A00(name="reservoir_carrier_1")
   picogreen_reservoir = hamilton_1_trough_60mL_Vb(name="picogreen_reservoir")
-  reservoir_carrier[0] = picogreen_reservoir
-  deck.assign_child_resource(reservoir_carrier, rails=2)
+  reservoir_carrier[1] = picogreen_reservoir
+  deck.assign_child_resource(reservoir_carrier, rails=13)
 
-  # One tube per carrier (each carrier has 32 sites; only site 0 is used --
-  # PyLabRobot has no smaller Hamilton Eppendorf carrier), each at its own
-  # rail slot rather than sharing one carrier between both tubes.
-  dna_stock_carrier = hamilton_tube_carrier_32_a00_insert_eppendorf_1_5mL(name="dna_stock_carrier")
+  # Both tubes on one 32-site carrier -- site 7 and site 8 (1-indexed:
+  # carrier[6]/carrier[7]), again a site *within* the carrier, not a rail.
+  tube_carrier = hamilton_tube_carrier_32_a00_insert_eppendorf_1_5mL(name="tube_carrier_1")
   dna_stock = eppendorf_tube_1500uL_Vb(name="dna_stock_100nguL")
-  dna_stock_carrier[0] = dna_stock
-  deck.assign_child_resource(dna_stock_carrier, rails=7)
-
-  te_diluent_carrier = hamilton_tube_carrier_32_a00_insert_eppendorf_1_5mL(name="te_diluent_carrier")
   te_diluent = eppendorf_tube_1500uL_Vb(name="te_diluent")
-  te_diluent_carrier[0] = te_diluent
-  deck.assign_child_resource(te_diluent_carrier, rails=8)
+  tube_carrier[6] = dna_stock
+  tube_carrier[7] = te_diluent
+  deck.assign_child_resource(tube_carrier, rails=14)
 
   # -- wire up the visualizer -------------------------------------------------
   server = VisualizerServer()
@@ -156,14 +156,14 @@ async def main() -> None:
   await backend.wait_for_start()
   print("Started.")
 
-  # 1-50uL -> 50uL tips, 50-300uL -> 300uL tips, 300-1000uL -> 1000uL tips:
-  # the smallest tip that comfortably holds the volume, same as real practice.
+  # 1-50uL -> 50uL tips, 50-300uL -> 300uL tips: the smallest tip that
+  # comfortably holds the volume, same as real practice. No volume in this
+  # protocol exceeds 300uL, so there's no third tier here -- see the deck
+  # layout above for why there's no 1000uL rack to fall back to anyway.
   def tip_rack_for_volume(volume_ul: float):
     if volume_ul <= 50:
       return tip_rack_50uL
-    if volume_ul <= 300:
-      return tip_rack_300uL
-    return tip_rack_1000uL
+    return tip_rack_300uL
 
   # A fresh tip-rack column per pipetting stage below, tracked separately
   # per rack size, so nothing ever tries to pick up from a spot an earlier
@@ -235,6 +235,20 @@ async def main() -> None:
   seconds_per_leg = 1.6
   await asyncio.sleep(dilution_stage_legs * seconds_per_leg * 1.3)
 
+  # -- add PicoGreen working solution -------------------------------------------
+  # 195uL calls for 300uL tips. Added *before* the smaller-volume sample/
+  # standard transfer below -- dispensing the larger-volume reagent first
+  # means the small sample volume lands in (and mixes into) a substantial
+  # existing volume, rather than the other way around.
+  for col in [*SAMPLE_COLUMNS, STANDARD_COLUMN]:
+    dest_wells = assay_plate[f"A{col}:H{col}"]
+    tc = fresh_tip_column(tip_rack_300uL)
+    await lh.pick_up_tips(tip_rack_300uL[f"A{tc}:H{tc}"])
+    await lh.aspirate([picogreen_reservoir] * 8, vols=[PICOGREEN_VOLUME] * 8, spread="wide")
+    await lh.dispense(dest_wells, vols=[PICOGREEN_VOLUME] * 8)
+    await lh.discard_tips()
+    await asyncio.sleep(0.3)
+
   # -- transfer samples + standards into the assay plate -----------------------
   # 5uL calls for 50uL tips.
   for col in [*SAMPLE_COLUMNS, STANDARD_COLUMN]:
@@ -244,17 +258,6 @@ async def main() -> None:
     await lh.pick_up_tips(tip_rack_50uL[f"A{tc}:H{tc}"])
     await lh.aspirate(source_wells, vols=[SAMPLE_TRANSFER_VOLUME] * 8)
     await lh.dispense(dest_wells, vols=[SAMPLE_TRANSFER_VOLUME] * 8)
-    await lh.discard_tips()
-    await asyncio.sleep(0.3)
-
-  # -- add PicoGreen working solution -------------------------------------------
-  # 195uL calls for 300uL tips.
-  for col in [*SAMPLE_COLUMNS, STANDARD_COLUMN]:
-    dest_wells = assay_plate[f"A{col}:H{col}"]
-    tc = fresh_tip_column(tip_rack_300uL)
-    await lh.pick_up_tips(tip_rack_300uL[f"A{tc}:H{tc}"])
-    await lh.aspirate([picogreen_reservoir] * 8, vols=[PICOGREEN_VOLUME] * 8, spread="wide")
-    await lh.dispense(dest_wells, vols=[PICOGREEN_VOLUME] * 8)
     await lh.discard_tips()
     await asyncio.sleep(0.3)
 

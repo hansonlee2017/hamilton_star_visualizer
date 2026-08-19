@@ -1126,6 +1126,49 @@ rail 2 and the two tubes to rails 7 and 8.
       `te_diluent_carrier`/`tip_carrier_1`/`plate_carrier_1` report world x
       122.5/235/257.5/280/415 -- exactly rails 2/7/8/9/15.
 
+## Review round 17 (2026-08-19)
+
+User correction on round 16's deck reposition, plus two new asks: "slot"
+meant a site *within* a carrier, not a deck rail -- reservoir to slot 2 of
+its carrier, tubes to slots 7 and 8 of theirs, with the carriers themselves
+moved back to their original rail positions; dispense the higher-volume
+PicoGreen reagent before the smaller sample/standard volume; and drop the
+1000uL tip rack since nothing in this protocol ever needs it.
+
+- [x] **Rail-vs-slot fix.** Round 16 read "slot 2"/"slot 7 and 8" as deck
+      rails and repositioned four carriers to make room. Reverted all four
+      carriers to round 15's original rails (tip=1, plate=7, reservoir=13,
+      tube=14) and, instead, indexed *into* the carriers: `reservoir_
+      carrier[1] = picogreen_reservoir` (site 2, 1-indexed) and a single
+      `tube_carrier` (collapsing round 16's two separate 32-tube carriers
+      back into one, matching the original request) with `tube_carrier[6]
+      = dna_stock` / `tube_carrier[7] = te_diluent` (sites 7 and 8,
+      1-indexed).
+- [x] **Reagent dispense order.** Swapped the two final per-column loops so
+      the 195uL PicoGreen-working-solution transfer (300uL tips) now runs
+      before the 5uL sample/standard transfer (50uL tips) for every
+      column -- the larger volume lands first, so the small sample volume
+      dispenses into (and mixes with) a substantial existing volume rather
+      than the reverse.
+- [x] **Removed the unused 1000uL tip rack.** Nothing in this protocol
+      pipettes above 200uL, so `tip_rack_for_volume()` went back to a
+      2-tier 50/300uL function and `hamilton_96_tiprack_1000uL_filter` was
+      dropped from both the deck and the import list entirely.
+
+      Verified live end-to-end: deck assigns without collision at the
+      reverted rails; `resourceIndex` confirms `dna_stock_100nguL`/
+      `te_diluent` sit in `tube_carrier_1`'s site-6/site-7 holders and
+      `picogreen_reservoir` in `reservoir_carrier_1`'s site-1 holder
+      (all 1-indexed-to-0-indexed as expected); the event log shows each
+      column's 195uL PicoGreen dispense preceding its 5uL sample dispense;
+      no tip name in the entire run ever reports a 1000uL/1065uL capacity
+      (only the 50uL/60uL and 300uL/360uL tiers appear); the protocol
+      finishes with no errors and every tracked volume exactly matches
+      hand-derived expectations -- all 32 assay wells at 200uL, standard
+      column rows A-F/H at 95uL and row G (the last dilution step's
+      target) at 195uL, `dna_stock`/`te_diluent` drawn down to 300uL each,
+      and `picogreen_reservoir` drawn down to 3760uL.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
