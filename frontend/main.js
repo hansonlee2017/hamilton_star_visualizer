@@ -155,7 +155,23 @@ const legendRowsEl = document.getElementById("legend-rows");
 const logListEl = document.getElementById("log-list");
 const replayBtn = document.getElementById("replay-btn");
 const startBtn = document.getElementById("start-btn");
+const resetBtn = document.getElementById("reset-btn");
 const speedSelect = document.getElementById("speed-select");
+const sampleVolumeInput = document.getElementById("sample-volume-input");
+const sampleCountInput = document.getElementById("sample-count-input");
+const picogreenReadoutEl = document.getElementById("picogreen-readout");
+
+// PicoGreen working solution is always however much of a 200uL total assay
+// well isn't sample -- a derived readout, not its own input (see
+// examples/picogreen_demo.py's docstring for the assay-chemistry reason a
+// fixed 200uL total makes sense).
+const ASSAY_TOTAL_VOLUME_UL = 200;
+function updatePicogreenReadout() {
+  const sampleVol = Number(sampleVolumeInput.value) || 0;
+  picogreenReadoutEl.textContent = `PicoGreen ${ASSAY_TOTAL_VOLUME_UL - sampleVol}µL`;
+}
+sampleVolumeInput.addEventListener("input", updatePicogreenReadout);
+updatePicogreenReadout();
 
 replayBtn.addEventListener("click", () => {
   if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
@@ -163,15 +179,45 @@ replayBtn.addEventListener("click", () => {
   logEvent("replay", "requested from server");
 });
 
+// Locks the two run-parameter inputs -- called both optimistically (this
+// tab clicked Start) and authoritatively (the server's "start_status"
+// broadcast, which every connected tab receives -- see the websocket
+// handler below) so a *second* browser tab that never clicked Start still
+// can't edit params for a run already underway.
+function lockRunParams() {
+  sampleVolumeInput.disabled = true;
+  sampleCountInput.disabled = true;
+}
+
 startBtn.addEventListener("click", () => {
   if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
-  currentWs.send(JSON.stringify({ action: "start_protocol" }));
+  const params = {
+    // Clamp client-side to the ranges the demo documents (1-20uL sample,
+    // 1-88 samples -- 88 = 11 full columns of 8, leaving column 12 free for
+    // the standard curve); the server also ignores a second "start_protocol"
+    // once one's been accepted, so a stale/hand-crafted message here can't
+    // change an already-running protocol's params either way.
+    sample_volume_ul: Math.min(20, Math.max(1, Math.round(Number(sampleVolumeInput.value) || 5))),
+    sample_count: Math.min(88, Math.max(1, Math.round(Number(sampleCountInput.value) || 24))),
+  };
+  currentWs.send(JSON.stringify({ action: "start_protocol", params }));
   // Optimistically reflect it immediately; the server's own
   // "start_status" broadcast (sent to every connected client, including
   // this one) will confirm it a moment later regardless.
   startBtn.disabled = true;
   startBtn.classList.add("started");
-  logEvent("start", "protocol started");
+  lockRunParams();
+  logEvent("start", `protocol started (${params.sample_count} samples, ${params.sample_volume_ul}uL each)`);
+});
+
+resetBtn.addEventListener("click", () => {
+  if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+  currentWs.send(JSON.stringify({ action: "reset" }));
+  // Optimistically disable right away -- the server's "reset" broadcast
+  // (once the protocol script actually rewinds) is what re-enables
+  // everything for the next run; see that handler below.
+  resetBtn.disabled = true;
+  logEvent("reset", "requested");
 });
 
 // durationScale is declared with animateChannelOp() below (it's the thing
@@ -1265,10 +1311,12 @@ function connect() {
     statusTextEl.textContent = "connected";
     replayBtn.disabled = false;
     // Whether to actually show this as clickable (vs. already-started) is
-    // settled a moment later by the "start_status" the server sends every
-    // new connection -- this just makes sure a *reconnect* doesn't leave it
-    // stuck disabled from the previous connection's onclose.
+    // settled a moment later by the "start_status"/"run_status" the server
+    // sends every new connection -- this just makes sure a *reconnect*
+    // doesn't leave things stuck disabled from the previous connection's
+    // onclose.
     startBtn.disabled = false;
+    resetBtn.disabled = true;
   };
   ws.onclose = () => {
     if (ws !== currentWs) return; // ditto -- don't let an old socket's close
@@ -1277,6 +1325,7 @@ function connect() {
     statusTextEl.textContent = "disconnected -- retrying...";
     replayBtn.disabled = true;
     startBtn.disabled = true;
+    resetBtn.disabled = true;
     setTimeout(connect, 1500);
   };
   ws.onerror = () => ws.close();
@@ -1295,7 +1344,27 @@ function connect() {
     } else if (msg.type === "start_status") {
       startBtn.disabled = msg.started;
       startBtn.classList.toggle("started", msg.started);
-      if (msg.started) logEvent("start", "protocol started");
+      if (msg.started) {
+        lockRunParams();
+        logEvent("start", "protocol started");
+      }
+    } else if (msg.type === "run_status") {
+      resetBtn.disabled = !msg.finished;
+      resetBtn.classList.toggle("visible", msg.finished);
+      if (msg.finished) logEvent("run_status", "finished -- reset available");
+    } else if (msg.type === "reset") {
+      // The protocol script rewound to wait for a new "Start Protocol" --
+      // put the whole HUD back to its pre-run state. The next "scene"
+      // message (once the new run's lh.setup() fires) rebuilds the 3D
+      // scene itself; this just resets the controls and log around it.
+      sampleVolumeInput.disabled = false;
+      sampleCountInput.disabled = false;
+      startBtn.disabled = false;
+      startBtn.classList.remove("started");
+      resetBtn.disabled = true;
+      resetBtn.classList.remove("visible");
+      logListEl.innerHTML = "";
+      logEvent("reset", "ready for a new run");
     }
   };
 }

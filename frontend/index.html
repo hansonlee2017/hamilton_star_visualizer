@@ -14,13 +14,21 @@
     #status .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; }
     #status.connected .dot { background: #35c46a; }
     #status.disconnected .dot { background: #d9534f; }
-    #replay-btn, #start-btn { pointer-events: auto; margin-left: 8px; background: rgba(20,22,26,0.85); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
-    #replay-btn:hover:not(:disabled), #start-btn:hover:not(:disabled) { background: rgba(40,44,50,0.9); }
-    #replay-btn:disabled, #start-btn:disabled { opacity: 0.5; cursor: default; }
+    #replay-btn, #start-btn, #reset-btn { pointer-events: auto; margin-left: 8px; background: rgba(20,22,26,0.85); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
+    #replay-btn:hover:not(:disabled), #start-btn:hover:not(:disabled), #reset-btn:hover:not(:disabled) { background: rgba(40,44,50,0.9); }
+    #replay-btn:disabled, #start-btn:disabled, #reset-btn:disabled { opacity: 0.5; cursor: default; }
     #start-btn { background: #2ea364; border-color: #2ea364; color: #0c1a12; font-weight: 600; }
     #start-btn:hover:not(:disabled) { background: #35bd73; }
     #start-btn.started { display: none; }
+    #reset-btn { display: none; }
+    #reset-btn.visible { display: inline-block; }
     #speed-select { pointer-events: auto; margin-left: 8px; background: rgba(20,22,26,0.85); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 6px; padding: 6px 8px; font-size: 13px; cursor: pointer; }
+
+    #run-params { pointer-events: auto; display: inline-flex; align-items: center; gap: 8px; margin-left: 8px; background: rgba(20,22,26,0.85); border: 1px solid #3a3f47; border-radius: 6px; padding: 4px 10px; font-size: 12px; color: #b7bcc4; }
+    #run-params label { display: inline-flex; align-items: center; gap: 4px; }
+    #run-params input[type="number"] { width: 46px; background: rgba(0,0,0,0.35); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 4px; padding: 3px 4px; font-size: 12px; }
+    #run-params input[type="number"]:disabled { opacity: 0.6; }
+    #run-params .readout { color: #59c9a5; white-space: nowrap; }
 
     #tooltip { position: absolute; z-index: 10; pointer-events: none; background: rgba(20,22,26,0.92); border: 1px solid #3a3f47; padding: 6px 8px; border-radius: 6px; font-size: 12px; line-height: 1.4; display: none; max-width: 260px; }
     #tooltip .name { font-weight: 600; }
@@ -47,7 +55,18 @@
 
   <div id="hud">
     <div id="status" class="disconnected"><span class="dot"></span><span id="status-text">connecting...</span></div>
+    <div id="run-params">
+      <label title="uL of sample mixed into each assay well (1-20)">Sample
+        <input id="sample-volume-input" type="number" min="1" max="20" step="1" value="5" />
+        &micro;L
+      </label>
+      <label title="How many samples to run, placed column-wise on the sample plate starting at A1 (1-88)">&times;
+        <input id="sample-count-input" type="number" min="1" max="88" step="1" value="24" />
+      </label>
+      <span id="picogreen-readout" class="readout" title="PicoGreen working solution per well: 200uL total - sample volume"></span>
+    </div>
     <button id="start-btn" disabled title="Tell the waiting protocol script to begin">&#9654; Start Protocol</button>
+    <button id="reset-btn" disabled title="Start the whole protocol over with new parameters (only once the current run has finished)">&#8635; Reset</button>
     <button id="replay-btn" disabled title="Re-run everything this server has recorded so far, from the start">&#8635; Replay</button>
     <select id="speed-select" title="Animation playback speed">
       <option value="1">1&times; speed</option>

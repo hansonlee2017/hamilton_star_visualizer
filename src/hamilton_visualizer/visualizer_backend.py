@@ -15,7 +15,7 @@ identically whether ``inner`` talks to real hardware or not.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from pylabrobot.liquid_handling.backends.backend import LiquidHandlerBackend
 from pylabrobot.liquid_handling.standard import (
@@ -101,9 +101,11 @@ class VisualizerBackend(LiquidHandlerBackend):
     await self._inner.stop()
     self.setup_finished = False
 
-  async def wait_for_start(self) -> None:
+  async def wait_for_start(self) -> Dict[str, Any]:
     """Block until "Start Protocol" is clicked (``VisualizerServer.
-    wait_for_start()``), then re-broadcast every resource's *current* state.
+    wait_for_start()``), then re-broadcast every resource's *current* state
+    and return whatever params dict the click sent (``{}`` if none -- see
+    ``VisualizerServer.wait_for_start()``'s docstring).
 
     Use this instead of calling ``self._server.wait_for_start()`` directly
     if your protocol does any manual state setup between ``lh.setup()`` and
@@ -118,7 +120,26 @@ class VisualizerBackend(LiquidHandlerBackend):
     setup is done" -- covers that gap.
     """
 
-    await self._server.wait_for_start()
+    params = await self._server.wait_for_start()
+    await self.broadcast_state()
+    return params
+
+  async def broadcast_state(self) -> None:
+    """Re-broadcast every resource's *current* state to all connected
+    clients, same as the one-time push ``setup()`` already does.
+
+    ``wait_for_start()`` calls this for you; call it directly instead if
+    your protocol needs to skip straight from ``server.wait_for_start()``
+    to doing param-dependent state setup (e.g. a run parameter entered in
+    the HUD determines how many wells to pre-fill, so it can't happen
+    before the browser's "Start Protocol" click carries it in -- see
+    ``examples/picogreen_demo.py``). tip_spot/well/trough/tube changes
+    aren't otherwise pushed live (see ``_LIVE_CALLBACK_EXCLUDED_
+    CATEGORIES``), so without an explicit call here afterward, anything set
+    up in that window would stay invisible until an aspirate/dispense/
+    pick_up_tips/drop_tips happened to touch it.
+    """
+
     await self._broadcast_initial_state(self.deck)
 
   # tip_spot/well/trough/tube changes driven by pick_up_tips/drop_tips/

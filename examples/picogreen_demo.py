@@ -2,9 +2,32 @@
 2-fold serial dilution, then transfer both unknown samples and standards
 into an assay plate and add PicoGreen working reagent to each.
 
+Two run parameters are entered in the visualizer's HUD, next to "Start
+Protocol", instead of being hardcoded (see index.html's ``#run-params``):
+
+  - **Sample volume** (1-20uL): how much sample/standard goes into each
+    assay well. PicoGreen working solution then makes up the rest of a
+    fixed 200uL total -- ``200 - sample_volume`` -- so every assay well
+    ends up at the same total volume regardless of the split; this is a
+    derived HUD readout, not its own input.
+  - **Sample count** (1-88): how many unknown samples to run, placed
+    column-wise on the sample plate starting at A1 (see
+    ``sample_column_groups()``). 88 = 11 full columns of 8 -- the most
+    that leaves column 12 free for the standard curve.
+
+Both are read from ``VisualizerServer.wait_for_start()``'s return value
+(whatever dict the "Start Protocol" click sent) once the button is clicked,
+and can't change after that -- the server itself ignores a second
+"start_protocol" message once one's been accepted (see
+``VisualizerServer.wait_for_start()``'s docstring), and the HUD inputs are
+locked in lockstep. A "Reset" button (locked until the run finishes --
+``VisualizerServer.mark_finished()``/``wait_for_reset()``) tears the whole
+thing down and loops back to a fresh deck with new parameters -- see
+``main()``'s ``while True:`` below.
+
 Deck layout (see the rails= values below for exact positions):
-  - 24 unknown samples in columns 1-3 of a 96-well PCR plate (8 rows x 3
-    columns).
+  - Unknown samples in columns 1-11 of a 96-well PCR plate, column-wise
+    from A1 (up to 88 of them -- see ``sample_column_groups()``).
   - An 8-point 2-fold dilution series, prepared from a 100 ng/uL DNA stock
     and a TE diluent (site 7 and site 8 of one 32-tube carrier), directly
     into column 12 of that *same* PCR plate -- rows A-G hold the dilution
@@ -14,10 +37,13 @@ Deck layout (see the rails= values below for exact positions):
     below fill it.
   - A 60mL Hamilton reservoir (site 2 of its carrier) holding PicoGreen
     working solution.
-  - Two tip rack sizes (50/300uL) -- see ``tip_rack_for_volume()``: a real
-    protocol picks the smallest tip that comfortably holds a given
-    transfer, not one size for everything (this protocol's volumes -
-    5-200uL - never call for a 1000uL tip).
+  - Three tip racks -- one 50uL, two 300uL (see ``fresh_tip_spots()``): a
+    real protocol picks the smallest tip that comfortably holds a given
+    transfer, not one size for everything. A single 96-tip rack only has
+    12 columns, and at the maximum sample count this protocol can need up
+    to 13 fresh 300uL columns (1 for the dilution stage + up to 12 sample/
+    standard transfer stages) -- one more than a single rack provides, so
+    the 300uL tips get a second rack.
 
 Protocol:
   1. Prepare the standard curve. Diluent goes into every well but the top
@@ -34,14 +60,15 @@ Protocol:
      their own tips, they physically travel along with channel 0 the whole
      time (planGantryPasses() drags any tip-loaded channel to wherever the
      arm goes, whether or not this specific call targets it).
-  2. For each of the 4 columns that matter (sample columns 1-3, standard
-     column 12), an 8-channel transfer adds 195uL of PicoGreen working
-     solution from the reservoir into the assay plate first -- all 8
-     channels aspirate from the one reservoir simultaneously
-     (``spread="wide"``, PyLabRobot's own idiom for multiple channels
-     sharing a single large container; see ``LiquidHandler.aspirate()``'s
-     docstring), rather than 8 separate single-channel round trips.
-  3. For those same 4 columns, an 8-channel transfer then moves 5uL from
+  2. For each sample/standard column that matters, an up-to-8-channel
+     transfer (the last sample column may be partial -- see
+     ``sample_column_groups()``) adds PicoGreen working solution from the
+     reservoir into the assay plate first -- all channels aspirate from
+     the one reservoir simultaneously (``spread="wide"``, PyLabRobot's own
+     idiom for multiple channels sharing a single large container; see
+     ``LiquidHandler.aspirate()``'s docstring), rather than separate
+     single-channel round trips.
+  3. For those same columns, a transfer then moves the sample volume from
      the PCR plate on top -- the larger-volume reagent goes in first, so
      the small sample volume lands in (and mixes into) a substantial
      existing volume rather than the other way around.
@@ -61,6 +88,8 @@ then open the printed URL (defaults to http://127.0.0.1:8765).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from typing import Any, Dict, Iterator, List, Tuple
 
 from pylabrobot.liquid_handling import LiquidHandler
 from pylabrobot.liquid_handling.backends.chatterbox import LiquidHandlerChatterboxBackend
@@ -68,7 +97,9 @@ from pylabrobot.resources import (
   PLT_CAR_L5AC_A00,
   TIP_CAR_480_A00,
   STARLetDeck,
+  Deck,
   Trough_CAR_5R60_A00,
+  TipRack,
   azenta_96_wellplate_200uL_Vb_4titudeframestar,
   cor_96_wellplate_360uL_Fb,
   eppendorf_tube_1500uL_Vb,
@@ -77,32 +108,64 @@ from pylabrobot.resources import (
   hamilton_96_tiprack_300uL_filter,
   hamilton_tube_carrier_32_a00_insert_eppendorf_1_5mL,
 )
+from pylabrobot.resources.trough import Trough
+from pylabrobot.resources.tube import Tube
+from pylabrobot.resources.plate import Plate
 
 from hamilton_visualizer import VisualizerBackend, VisualizerServer
 
 STANDARD_COLUMN = "12"
-SAMPLE_COLUMNS = ["1", "2", "3"]
 ROWS = "ABCDEFGH"
 
-DILUTION_VOLUME = 100.0  # uL per standard-curve well
-SAMPLE_TRANSFER_VOLUME = 5.0  # uL of sample/standard into the assay plate
-PICOGREEN_VOLUME = 195.0  # uL of working reagent per assay well
+DILUTION_VOLUME = 100.0  # uL per standard-curve well, fixed regardless of run params
+
+# Every assay well ends up at this total volume -- PicoGreen working
+# solution makes up whatever the sample volume doesn't. Matches
+# frontend/main.js's ASSAY_TOTAL_VOLUME_UL (the HUD's derived readout).
+ASSAY_TOTAL_VOLUME_UL = 200.0
+
+# Matches index.html's #sample-volume-input/#sample-count-input min/max/
+# value attributes -- kept in sync by hand, same as every other place a
+# real quantity appears in both the Python protocol and the JS HUD.
+MIN_SAMPLE_VOLUME_UL, MAX_SAMPLE_VOLUME_UL, DEFAULT_SAMPLE_VOLUME_UL = 1.0, 20.0, 5.0
+# 88 = 11 full columns of 8 -- the most that still leaves column 12 free
+# for the standard curve (see sample_column_groups()).
+MIN_SAMPLE_COUNT, MAX_SAMPLE_COUNT, DEFAULT_SAMPLE_COUNT = 1, 88, 24
 
 
-async def main() -> None:
-  # -- deck layout ------------------------------------------------------------
+@dataclass
+class Resources:
+  """Every resource the protocol body below needs a direct handle to,
+  bundled so ``build_deck()`` can hand them all back at once. Rebuilt fresh
+  each pass through ``main()``'s loop -- see that function's docstring for
+  why reusing one set of PyLabRobot resources/trackers across a Reset would
+  be more fragile than just building new ones.
+  """
+
+  sample_plate: Plate
+  assay_plate: Plate
+  picogreen_reservoir: Trough
+  dna_stock: Tube
+  te_diluent: Tube
+  tip_rack_50uL: TipRack
+  tip_rack_300uL_a: TipRack
+  tip_rack_300uL_b: TipRack
+
+
+def build_deck() -> Tuple[Deck, Resources]:
   deck = STARLetDeck()
 
-  # Every tip size this protocol needs lives on one carrier -- pick the
-  # smallest tip that comfortably holds a given transfer (tip_rack_for_
-  # volume() below), the same way a real protocol would, rather than
-  # reaching for one size for everything. No 1000uL rack -- nothing here
-  # ever aspirates/dispenses more than 200uL, so it would just sit unused.
+  # 50uL tips for the 1-20uL sample/standard transfer; 300uL tips for
+  # everything else (the 100-200uL dilution stage, and the 180-199uL
+  # PicoGreen transfer). Two 300uL racks -- see this module's docstring for
+  # why one (12 columns) isn't quite enough at the maximum sample count.
   tip_carrier = TIP_CAR_480_A00(name="tip_carrier_1")
   tip_rack_50uL = hamilton_96_tiprack_50uL_filter(name="tip_rack_50uL")
-  tip_rack_300uL = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL")
+  tip_rack_300uL_a = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL_a")
+  tip_rack_300uL_b = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL_b")
   tip_carrier[0] = tip_rack_50uL
-  tip_carrier[1] = tip_rack_300uL
+  tip_carrier[1] = tip_rack_300uL_a
+  tip_carrier[2] = tip_rack_300uL_b
   deck.assign_child_resource(tip_carrier, rails=1)
 
   # Both the PCR sample plate and the Corning assay plate live on the same
@@ -132,137 +195,241 @@ async def main() -> None:
   tube_carrier[7] = te_diluent
   deck.assign_child_resource(tube_carrier, rails=14)
 
-  # -- wire up the visualizer -------------------------------------------------
+  return deck, Resources(
+    sample_plate=sample_plate,
+    assay_plate=assay_plate,
+    picogreen_reservoir=picogreen_reservoir,
+    dna_stock=dna_stock,
+    te_diluent=te_diluent,
+    tip_rack_50uL=tip_rack_50uL,
+    tip_rack_300uL_a=tip_rack_300uL_a,
+    tip_rack_300uL_b=tip_rack_300uL_b,
+  )
+
+
+def sample_column_groups(sample_count: int) -> List[Tuple[str, str]]:
+  """Column-wise placement starting at A1: full 8-row columns until the
+  last one, which may be partial -- e.g. 20 samples is columns 1-2 full
+  (16) plus rows A-D of column 3 (4 more). Returns ``(column, rows)``
+  pairs; ``rows`` is a prefix of ``ROWS`` (1-8 letters long).
+
+  ``sample_count`` is capped at ``MAX_SAMPLE_COUNT`` (88 = 11 full
+  columns), so this never reaches column 12 -- the standard curve's column
+  -- regardless of what a caller passes in.
+  """
+
+  groups: List[Tuple[str, str]] = []
+  remaining = min(sample_count, MAX_SAMPLE_COUNT)
+  col = 1
+  while remaining > 0:
+    n = min(len(ROWS), remaining)
+    groups.append((str(col), ROWS[:n]))
+    remaining -= n
+    col += 1
+  return groups
+
+
+def _clamped_param(params: Dict[str, Any], key: str, default: float, lo: float, hi: float) -> float:
+  """Read ``key`` out of the "Start Protocol" click's params dict, falling
+  back to ``default`` for anything missing or unparseable, and clamping to
+  ``[lo, hi]`` regardless -- the value crossed a websocket from a browser,
+  so it's treated the same as any other untrusted external input (argv, a
+  config file) rather than trusted outright.
+  """
+
+  try:
+    value = float(params.get(key, default))
+  except (TypeError, ValueError):
+    value = default
+  return max(lo, min(hi, value))
+
+
+def rack_column_stream(racks: List[TipRack]) -> Iterator[Tuple[TipRack, int]]:
+  """Yield ``(rack, column)`` pairs across one or more same-size racks, one
+  fresh column at a time -- moving on to the next rack once the current
+  one's 12 columns (a 96-tip rack only has 12, not enough on its own for
+  every fresh-tip pickup this protocol can need at the maximum sample
+  count -- see this module's docstring) are used up.
+  """
+
+  for rack in racks:
+    for col in range(1, 13):
+      yield rack, col
+
+
+async def main() -> None:
   server = VisualizerServer()
   await server.start()
 
-  inner_backend = LiquidHandlerChatterboxBackend(num_channels=8)
-  backend = VisualizerBackend(inner_backend, server)
-  lh = LiquidHandler(backend=backend, deck=deck)
-  await lh.setup()  # also turns on tip/volume tracking -- see VisualizerBackend docstring
+  # "Start the entire thing over" (this module's docstring) rebuilds a
+  # completely fresh deck/backend/LiquidHandler each pass, rather than
+  # trying to hand-reset every tracker on the previous run's resources in
+  # place -- PyLabRobot's tip/volume trackers, well contents, and
+  # VisualizerBackend's per-resource state callbacks all get a clean slate
+  # this way, for free, the same way restarting the whole script would give
+  # you, just without actually restarting the process or the HTTP server.
+  while True:
+    deck, res = build_deck()
 
-  # -- pre-fill reagents/samples -----------------------------------------------
-  for well in sample_plate["A1:H3"]:
-    well.set_volume(50.0)
-  dna_stock.tracker.set_volume(500.0)
-  te_diluent.tracker.set_volume(1000.0)
-  picogreen_reservoir.tracker.set_volume(10_000.0)
+    inner_backend = LiquidHandlerChatterboxBackend(num_channels=8)
+    backend = VisualizerBackend(inner_backend, server)
+    lh = LiquidHandler(backend=backend, deck=deck)
+    await lh.setup()  # also turns on tip/volume tracking -- see VisualizerBackend docstring
 
-  # Wait for you to open the visualizer, check the initial state, and click
-  # "Start Protocol" -- see demo_protocol.py for why backend.wait_for_start()
-  # (not server.wait_for_start()) matters here: it re-syncs state so the
-  # pre-fill above is visible from the very first frame.
-  print("Open the visualizer, then click 'Start Protocol' when ready.")
-  await backend.wait_for_start()
-  print("Started.")
+    # Reagents that don't depend on the run's parameters get pre-filled
+    # right away, before waiting for "Start Protocol" -- so, like every
+    # other demo in this repo, you can review them in the visualizer before
+    # clicking it. The sample plate and PicoGreen reservoir *do* depend on
+    # the sample count/volume entered in the HUD right next to that button,
+    # so they can't be filled until after it's clicked -- see below.
+    res.dna_stock.tracker.set_volume(500.0)
+    res.te_diluent.tracker.set_volume(1000.0)
 
-  # 1-50uL -> 50uL tips, 50-300uL -> 300uL tips: the smallest tip that
-  # comfortably holds the volume, same as real practice. No volume in this
-  # protocol exceeds 300uL, so there's no third tier here -- see the deck
-  # layout above for why there's no 1000uL rack to fall back to anyway.
-  def tip_rack_for_volume(volume_ul: float):
-    if volume_ul <= 50:
-      return tip_rack_50uL
-    return tip_rack_300uL
+    # server.wait_for_start() (not backend.wait_for_start()) deliberately
+    # skips backend's usual post-click state resync here -- this protocol
+    # still has param-dependent pre-filling to do first (below), and that
+    # resync is a one-shot broadcast of *current* state, not a live feed
+    # (see _LIVE_CALLBACK_EXCLUDED_CATEGORIES's docstring): doing it now
+    # would broadcast the not-yet-filled sample plate/reservoir, and
+    # nothing would ever correct it. backend.broadcast_state() below does
+    # the same resync once the fill is actually done.
+    print("Open the visualizer, then click 'Start Protocol' when ready.")
+    params = await server.wait_for_start()
+    sample_volume = _clamped_param(
+      params, "sample_volume_ul", DEFAULT_SAMPLE_VOLUME_UL, MIN_SAMPLE_VOLUME_UL, MAX_SAMPLE_VOLUME_UL
+    )
+    sample_count = int(
+      _clamped_param(params, "sample_count", DEFAULT_SAMPLE_COUNT, MIN_SAMPLE_COUNT, MAX_SAMPLE_COUNT)
+    )
+    picogreen_volume = ASSAY_TOTAL_VOLUME_UL - sample_volume
+    print(
+      f"Started: {sample_count} sample(s) at {sample_volume}uL each "
+      f"({picogreen_volume}uL PicoGreen per well)."
+    )
 
-  # A fresh tip-rack column per pipetting stage below, tracked separately
-  # per rack size, so nothing ever tries to pick up from a spot an earlier
-  # stage already emptied.
-  tip_columns = {tip_rack_50uL: iter(range(1, 13)), tip_rack_300uL: iter(range(1, 13))}
+    sample_groups = sample_column_groups(sample_count)
+    for col, rows in sample_groups:
+      for well in res.sample_plate[f"{rows[0]}{col}:{rows[-1]}{col}"]:
+        well.set_volume(50.0)  # comfortably above the 1-20uL max sample transfer
 
-  def fresh_tip_column(rack) -> str:
-    return str(next(tip_columns[rack]))
+    # Enough PicoGreen for every sample/standard well this run actually
+    # uses (picogreen_volume uL x each of sample_count sample wells + the
+    # 8 standard wells), plus a small margin -- not a flat guess, and
+    # capped at the trough's real 60mL capacity even though the true
+    # maximum (88 samples, 199uL/well) comes nowhere close to it.
+    required_picogreen = (sample_count + len(ROWS)) * picogreen_volume + 500.0
+    res.picogreen_reservoir.tracker.set_volume(min(required_picogreen, 60_000.0))
 
-  standard_wells = sample_plate[[f"{row}{STANDARD_COLUMN}" for row in ROWS]]
+    await backend.broadcast_state()
 
-  # -- standard curve: 2-fold serial dilution ----------------------------------
-  # All the dilution-stage volumes (100-200uL) call for 300uL tips. One
-  # column, all 8 rows -> channels 0-7 -- picked up once, then used
-  # selectively below (channel 0 alone for the sequential steps, channels
-  # 1-7 together for the diluent distribution) rather than picking up
-  # per-step.
-  dilution_tip_rack = tip_rack_for_volume(DILUTION_VOLUME)
-  tc = fresh_tip_column(dilution_tip_rack)
-  await lh.pick_up_tips(dilution_tip_rack[f"A{tc}:H{tc}"])
-  await asyncio.sleep(0.3)
+    # 1-50uL -> the 50uL rack, everything else -> a 300uL rack: the
+    # smallest tip that comfortably holds the volume, same as real
+    # practice.
+    def tier_for_volume(volume_ul: float) -> str:
+      return "50" if volume_ul <= 50 else "300"
 
-  # Diluent into every well but the top standard, including the blank
-  # (H12) -- channels 1-7 each independently visit the tiny diluent tube
-  # in turn (only one channel fits its ~10mm opening at a time), then all
-  # 7 dispense into their own row's well simultaneously, since B12-H12
-  # share a column.
-  for channel in range(1, 8):
-    await lh.aspirate([te_diluent], vols=[DILUTION_VOLUME], use_channels=[channel])
-  await lh.dispense(standard_wells[1:], vols=[DILUTION_VOLUME] * 7, use_channels=list(range(1, 8)))
-  await asyncio.sleep(0.3)
+    tip_streams = {
+      "50": rack_column_stream([res.tip_rack_50uL]),
+      "300": rack_column_stream([res.tip_rack_300uL_a, res.tip_rack_300uL_b]),
+    }
 
-  # Top standard: the neat 100 ng/uL stock, no dilution -- channel 0. *2x*
-  # the other wells' volume, since the very next step pulls DILUTION_VOLUME
-  # back out of it for the A->B transfer. Without the extra headroom, A12
-  # would be left at 0uL: enough to make the dilution series arithmetic
-  # work, but nothing left for this well's own 5uL assay-plate transfer
-  # later.
-  await lh.aspirate([dna_stock], vols=[DILUTION_VOLUME * 2], use_channels=[0])
-  await lh.dispense([standard_wells[0]], vols=[DILUTION_VOLUME * 2], use_channels=[0])
-  await asyncio.sleep(0.3)
+    def fresh_tip_spots(tier: str, rows: str):
+      rack, col = next(tip_streams[tier])
+      return rack[f"{rows[0]}{col}:{rows[-1]}{col}"]
 
-  # Serial 2-fold dilution across A12-G12 -- channel 0 alone, continuing
-  # with the same tip it started with (descending concentration the whole
-  # way, so no cross-contamination concern). H12 is deliberately never
-  # touched again here, so it stays pure diluent (the blank).
-  for source, target in zip(standard_wells[:-2], standard_wells[1:-1]):
-    await lh.aspirate([source], vols=[DILUTION_VOLUME], use_channels=[0])
-    await lh.dispense([target], vols=[DILUTION_VOLUME], use_channels=[0])
-    await asyncio.sleep(0.2)
+    standard_wells = res.sample_plate[[f"{row}{STANDARD_COLUMN}" for row in ROWS]]
 
-  await lh.discard_tips()
-  # A real Hamilton's 8 channels share one arm (see frontend/main.js's
-  # planGantryPasses() docstring): even with channels 1-7 dragged along
-  # for realism during the steps above, the *whole arm* was still tied up
-  # the entire time -- dragging a channel along still takes the same
-  # ~1.6s/leg as doing real work, it just isn't idle-and-ignored the way
-  # an earlier version of this demo left it. So this wait is still the
-  # real time nothing else could start, not a workaround: every channel
-  # ends this stage with exactly 24 legs of animation (pick-up, 7 diluent-
-  # distribution stops -- one real aspirate each, dragged along for the
-  # other 6 -- the shared dispense, top-standard aspirate+dispense, 6
-  # serial aspirate/dispense pairs, discard), each a full rise+x+y+
-  # descend+hold+retract cycle (~1.6s at 1x), plus a margin (round 9's
-  # cherry-pick demo found even a ~500ms/1.6s margin on a *single* pass
-  # needed live tuning -- scaling that same proportion up over this many
-  # legs is safer than guessing).
-  dilution_stage_legs = 24
-  seconds_per_leg = 1.6
-  await asyncio.sleep(dilution_stage_legs * seconds_per_leg * 1.3)
-
-  # -- add PicoGreen working solution -------------------------------------------
-  # 195uL calls for 300uL tips. Added *before* the smaller-volume sample/
-  # standard transfer below -- dispensing the larger-volume reagent first
-  # means the small sample volume lands in (and mixes into) a substantial
-  # existing volume, rather than the other way around.
-  for col in [*SAMPLE_COLUMNS, STANDARD_COLUMN]:
-    dest_wells = assay_plate[f"A{col}:H{col}"]
-    tc = fresh_tip_column(tip_rack_300uL)
-    await lh.pick_up_tips(tip_rack_300uL[f"A{tc}:H{tc}"])
-    await lh.aspirate([picogreen_reservoir] * 8, vols=[PICOGREEN_VOLUME] * 8, spread="wide")
-    await lh.dispense(dest_wells, vols=[PICOGREEN_VOLUME] * 8)
-    await lh.discard_tips()
+    # -- standard curve: 2-fold serial dilution --------------------------------
+    # All the dilution-stage volumes (100-200uL) call for 300uL tips. One
+    # column, all 8 rows -> channels 0-7 -- picked up once, then used
+    # selectively below (channel 0 alone for the sequential steps, channels
+    # 1-7 together for the diluent distribution) rather than picking up
+    # per-step.
+    await lh.pick_up_tips(fresh_tip_spots(tier_for_volume(DILUTION_VOLUME), ROWS))
     await asyncio.sleep(0.3)
 
-  # -- transfer samples + standards into the assay plate -----------------------
-  # 5uL calls for 50uL tips.
-  for col in [*SAMPLE_COLUMNS, STANDARD_COLUMN]:
-    source_wells = sample_plate[f"A{col}:H{col}"]
-    dest_wells = assay_plate[f"A{col}:H{col}"]
-    tc = fresh_tip_column(tip_rack_50uL)
-    await lh.pick_up_tips(tip_rack_50uL[f"A{tc}:H{tc}"])
-    await lh.aspirate(source_wells, vols=[SAMPLE_TRANSFER_VOLUME] * 8)
-    await lh.dispense(dest_wells, vols=[SAMPLE_TRANSFER_VOLUME] * 8)
-    await lh.discard_tips()
+    # Diluent into every well but the top standard, including the blank
+    # (H12) -- channels 1-7 each independently visit the tiny diluent tube
+    # in turn (only one channel fits its ~10mm opening at a time), then all
+    # 7 dispense into their own row's well simultaneously, since B12-H12
+    # share a column.
+    for channel in range(1, 8):
+      await lh.aspirate([res.te_diluent], vols=[DILUTION_VOLUME], use_channels=[channel])
+    await lh.dispense(standard_wells[1:], vols=[DILUTION_VOLUME] * 7, use_channels=list(range(1, 8)))
     await asyncio.sleep(0.3)
 
-  print("PicoGreen assay setup finished. Leaving the server up -- Ctrl+C to exit.")
-  await asyncio.Event().wait()
+    # Top standard: the neat 100 ng/uL stock, no dilution -- channel 0. *2x*
+    # the other wells' volume, since the very next step pulls DILUTION_VOLUME
+    # back out of it for the A->B transfer. Without the extra headroom, A12
+    # would be left at 0uL: enough to make the dilution series arithmetic
+    # work, but nothing left for this well's own assay-plate transfer later.
+    await lh.aspirate([res.dna_stock], vols=[DILUTION_VOLUME * 2], use_channels=[0])
+    await lh.dispense([standard_wells[0]], vols=[DILUTION_VOLUME * 2], use_channels=[0])
+    await asyncio.sleep(0.3)
+
+    # Serial 2-fold dilution across A12-G12 -- channel 0 alone, continuing
+    # with the same tip it started with (descending concentration the whole
+    # way, so no cross-contamination concern). H12 is deliberately never
+    # touched again here, so it stays pure diluent (the blank).
+    for source, target in zip(standard_wells[:-2], standard_wells[1:-1]):
+      await lh.aspirate([source], vols=[DILUTION_VOLUME], use_channels=[0])
+      await lh.dispense([target], vols=[DILUTION_VOLUME], use_channels=[0])
+      await asyncio.sleep(0.2)
+
+    await lh.discard_tips()
+    # A real Hamilton's 8 channels share one arm (see frontend/main.js's
+    # planGantryPasses() docstring): even with channels 1-7 dragged along
+    # for realism during the steps above, the *whole arm* was still tied up
+    # the entire time -- dragging a channel along still takes the same
+    # ~1.6s/leg as doing real work, it just isn't idle-and-ignored the way
+    # an earlier version of this demo left it. So this wait is still the
+    # real time nothing else could start, not a workaround: every channel
+    # ends this stage with exactly 24 legs of animation (pick-up, 7 diluent-
+    # distribution stops -- one real aspirate each, dragged along for the
+    # other 6 -- the shared dispense, top-standard aspirate+dispense, 6
+    # serial aspirate/dispense pairs, discard), each a full rise+x+y+
+    # descend+hold+retract cycle (~1.6s at 1x), plus a margin (round 9's
+    # cherry-pick demo found even a ~500ms/1.6s margin on a *single* pass
+    # needed live tuning -- scaling that same proportion up over this many
+    # legs is safer than guessing).
+    dilution_stage_legs = 24
+    seconds_per_leg = 1.6
+    await asyncio.sleep(dilution_stage_legs * seconds_per_leg * 1.3)
+
+    # -- add PicoGreen working solution, then samples/standards ---------------
+    # Added *before* the smaller-volume sample/standard transfer below --
+    # dispensing the larger-volume reagent first means the small sample
+    # volume lands in (and mixes into) a substantial existing volume,
+    # rather than the other way around.
+    transfer_groups = [*sample_groups, (STANDARD_COLUMN, ROWS)]
+    picogreen_tier = tier_for_volume(picogreen_volume)
+    for col, rows in transfer_groups:
+      n = len(rows)
+      dest_wells = res.assay_plate[f"{rows[0]}{col}:{rows[-1]}{col}"]
+      await lh.pick_up_tips(fresh_tip_spots(picogreen_tier, rows))
+      await lh.aspirate([res.picogreen_reservoir] * n, vols=[picogreen_volume] * n, spread="wide")
+      await lh.dispense(dest_wells, vols=[picogreen_volume] * n)
+      await lh.discard_tips()
+      await asyncio.sleep(0.3)
+
+    sample_tier = tier_for_volume(sample_volume)
+    for col, rows in transfer_groups:
+      n = len(rows)
+      source_wells = res.sample_plate[f"{rows[0]}{col}:{rows[-1]}{col}"]
+      dest_wells = res.assay_plate[f"{rows[0]}{col}:{rows[-1]}{col}"]
+      await lh.pick_up_tips(fresh_tip_spots(sample_tier, rows))
+      await lh.aspirate(source_wells, vols=[sample_volume] * n)
+      await lh.dispense(dest_wells, vols=[sample_volume] * n)
+      await lh.discard_tips()
+      await asyncio.sleep(0.3)
+
+    print("PicoGreen assay setup finished.")
+    await server.mark_finished()
+    print("Click 'Reset' in the visualizer to run again with new parameters, or Ctrl+C to exit.")
+    await server.wait_for_reset()
+    await lh.stop()
+    await server.reset_for_new_run()
+    print("Reset -- waiting for a new run.")
 
 
 if __name__ == "__main__":

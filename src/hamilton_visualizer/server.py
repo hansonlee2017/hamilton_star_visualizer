@@ -81,6 +81,18 @@ class VisualizerServer:
     self._serve_task: Optional["asyncio.Task[None]"] = None
     # Set when a browser clicks "Start Protocol" -- see wait_for_start().
     self._start_event = asyncio.Event()
+    # Whatever JSON-serializable dict the "Start Protocol" click sent along
+    # (e.g. a demo's own sample-count/volume fields) -- opaque to this class,
+    # just handed back verbatim by wait_for_start(). {} if the browser sent
+    # no params (or an older frontend that doesn't send any at all).
+    self._start_params: Dict[str, Any] = {}
+    # Set by a protocol script calling mark_finished() -- gates "reset" (see
+    # wait_for_reset()/reset_for_new_run()): a run in progress can't be
+    # interrupted from the browser, only restarted once it's actually done.
+    self._finished_event = asyncio.Event()
+    # Set when a browser clicks "Reset" *after* mark_finished() -- see
+    # wait_for_reset().
+    self._reset_event = asyncio.Event()
     self.app = self._build_app()
 
   def _build_app(self) -> FastAPI:
@@ -125,6 +137,7 @@ class VisualizerServer:
         for state_event in self._latest_state.values():
           await self._send(websocket, state_event)
         await self._send(websocket, {"type": "start_status", "started": self._start_event.is_set()})
+        await self._send(websocket, {"type": "run_status", "finished": self._finished_event.is_set()})
         while True:
           raw = await websocket.receive_text()
           try:
@@ -135,8 +148,15 @@ class VisualizerServer:
           if action == "replay":
             await self.replay(websocket)
           elif action == "start_protocol" and not self._start_event.is_set():
+            params = msg.get("params")
+            self._start_params = params if isinstance(params, dict) else {}
             self._start_event.set()
             await self.broadcast({"type": "start_status", "started": True})
+          elif action == "reset" and self._finished_event.is_set():
+            # Guarded server-side, not just by the browser graying the button
+            # out -- a run in progress must never be torn down mid-protocol
+            # (see wait_for_reset()'s docstring).
+            self._reset_event.set()
       except WebSocketDisconnect:
         pass
       finally:
@@ -164,9 +184,10 @@ class VisualizerServer:
     if self._serve_task is not None:
       await self._serve_task
 
-  async def wait_for_start(self) -> None:
+  async def wait_for_start(self) -> Dict[str, Any]:
     """Block until a browser clicks "Start Protocol" (the HUD button sends
-    ``{"action": "start_protocol"}``).
+    ``{"action": "start_protocol", "params": {...}}``), then return whatever
+    ``params`` dict it sent (``{}`` if none).
 
     Call this after setting up your deck/scene and before running your
     actual protocol steps, instead of an arbitrary ``asyncio.sleep()`` --
@@ -174,9 +195,64 @@ class VisualizerServer:
     confirming the initial deck/tip/liquid state looks right, with no risk
     of the protocol racing ahead and starting before you're connected (see
     docs/PLAN.md's "Review round 7" for why that was worth fixing).
+
+    ``params`` is opaque to this class -- a demo with its own HUD inputs
+    (e.g. a sample count/volume) reads its own keys back out and is
+    responsible for validating/clamping them, exactly as if they'd come from
+    argv or a config file. Once ``_start_event`` is set, further
+    "start_protocol" messages are ignored server-side (see the websocket
+    handler above) -- a run's params, once accepted, can't be changed
+    mid-run from the browser.
     """
 
     await self._start_event.wait()
+    return self._start_params
+
+  async def mark_finished(self) -> None:
+    """Tell every connected client the current run has finished -- enables
+    the HUD's "Reset" button (see ``wait_for_reset()``).
+
+    Call this once your protocol's last step is done, before whatever your
+    script does to keep the process alive afterward.
+    """
+
+    self._finished_event.set()
+    await self.broadcast({"type": "run_status", "finished": True})
+
+  async def wait_for_reset(self) -> None:
+    """Block until a browser clicks "Reset" (only accepted, server-side,
+    once :meth:`mark_finished` has been called -- see the websocket
+    handler's ``action == "reset"`` guard).
+
+    A protocol script that wants a "start the whole thing over" loop should
+    await this right after :meth:`mark_finished`, then call
+    :meth:`reset_for_new_run` and go back to building a fresh deck and
+    calling :meth:`wait_for_start` again.
+    """
+
+    await self._reset_event.wait()
+
+  async def reset_for_new_run(self) -> None:
+    """Clear every piece of per-run state so the next
+    ``wait_for_start()``/``wait_for_reset()`` cycle starts clean, and tell
+    every connected client to reset its own UI (clear the event log,
+    re-enable the parameter inputs, hide "Reset" again) via a ``"reset"``
+    broadcast.
+
+    Deliberately drops the scene/state/event history too -- "start the
+    entire thing over" means exactly that; a stale Replay of the previous
+    run would be confusing once a new one is underway.
+    """
+
+    self._start_event.clear()
+    self._start_params = {}
+    self._finished_event.clear()
+    self._reset_event.clear()
+    self._scene = None
+    self._num_channels = None
+    self._latest_state.clear()
+    self._events.clear()
+    await self.broadcast({"type": "reset"})
 
   async def set_scene(self, scene: Dict[str, Any], *, num_channels: int) -> None:
     """Cache the deck scene graph and push it to every connected client.

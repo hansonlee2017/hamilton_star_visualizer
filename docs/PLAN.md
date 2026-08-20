@@ -1209,6 +1209,79 @@ starting position.
       channel 7 at the lowest (most "front"), matching the real per-
       channel trash-offset convention instead of the old mirrored order.
 
+## Review round 19 (2026-08-19)
+
+User request: let the PicoGreen/sample mixing ratio and the sample count be
+entered in the HUD, next to Start, instead of hardcoded -- sample volume
+1-20uL (PicoGreen working solution makes up the rest of a fixed 200uL
+total), sample count 1-88 placed column-wise on the sample plate from A1.
+Locked once started; a Reset button (locked until the run finishes) starts
+the whole thing over with new values.
+
+- [x] **Library support for params + reset, in `VisualizerServer`/
+      `VisualizerBackend`, not just this one demo.** `"start_protocol"` now
+      carries an opaque `params` dict, handed back verbatim by
+      `wait_for_start()` -- the server doesn't know or care what's in it,
+      same as argv or a config file would be to any other script. Guarded
+      exactly like before: a second `"start_protocol"` once one's been
+      accepted is ignored server-side, so a run's params can't change
+      mid-run regardless of what the browser sends. Added
+      `mark_finished()`/`wait_for_reset()`/`reset_for_new_run()` for the
+      "start over" half -- `"reset"` is only honored server-side once
+      `mark_finished()` has been called (matches "lock the reset button
+      during execution" exactly, and isn't just a UI nicety -- a
+      hand-crafted `{"action": "reset"}` sent mid-run is ignored too).
+      `reset_for_new_run()` clears scene/state/event history and broadcasts
+      a `"reset"` message so every connected client's HUD (not just the one
+      that clicked) goes back to its pre-run state. Also added
+      `VisualizerBackend.broadcast_state()`, a public split-out of what
+      `wait_for_start()` already did internally -- needed here because this
+      demo's sample-count-dependent pre-fill can't happen until *after*
+      the params arrive, but tip_spot/well/trough/tube state only pushes
+      live via that one-shot broadcast, not a live callback (see
+      `_LIVE_CALLBACK_EXCLUDED_CATEGORIES`), so skipping it would leave the
+      HUD showing the pre-fill's *previous* (empty) state forever.
+- [x] **`examples/picogreen_demo.py` restructured around a `while True:`
+      loop.** Each pass builds a completely fresh deck/backend/
+      `LiquidHandler` (`build_deck()`) rather than hand-resetting the
+      previous run's PyLabRobot trackers in place -- simpler and more
+      certainly correct, and no different from what actually restarting the
+      script would give you, just without restarting the process. Sample
+      placement is column-wise from A1 via `sample_column_groups()`: full
+      8-row columns until the last, which may be partial (e.g. 20 samples
+      is 2 full columns + 4 more rows of a 3rd). 88 is exactly 11 full
+      columns, so the standard curve's column 12 is never reachable
+      regardless of what a client sends -- enforced by clamping, not just
+      documented.
+- [x] **A second 300uL tip rack, because the first one really would run
+      out.** A 96-tip rack only has 12 columns. At the maximum sample count
+      this protocol can need up to 13 fresh 300uL columns in one run (1 for
+      the dilution stage + up to 12 sample/standard transfer stages) --
+      one more than a single rack provides. `rack_column_stream()`
+      generalizes the existing fresh-tip-column idiom to roll over to a
+      second rack once the first's 12 columns are exhausted, instead of
+      raising `StopIteration`/a PLR "no tip" error partway through an
+      88-sample run.
+
+      Verified live, two runs back to back through a full Reset cycle:
+      (1) baseline params (24 samples/5uL, matching round 17's already-
+      verified behavior) finished with all 32 assay wells at exactly
+      200uL, the standard curve at 95/95/95/95/95/95/195/95uL, and the
+      reservoir drawn down to exactly the hand-derived 500uL remaining;
+      clicking Reset cleared the event log, rebuilt a fully-stocked fresh
+      scene, and re-enabled both inputs and Start. (2) The worst case,
+      88 samples at 20uL each (180uL PicoGreen), run immediately after:
+      every one of the 96 assay wells (88 sample + 8 standard) landed at
+      exactly 200uL, all 88 sample-plate source wells drawn down to
+      exactly 30uL (50uL prefill - 20uL pulled), and the reservoir's
+      remaining volume again matched the hand-derived 500uL exactly.
+      Grepping the two runs' combined tip-rack usage confirmed the
+      rollover worked precisely as designed: rack A got 136 tip-spot
+      pickups (run 1's 5 columns + run 2's first 12), rack B got exactly
+      8 (run 2's 13th, overflow column) -- not one spot more or less than
+      the hand-derived expectation. No 1000uL tip, malformed volume, or
+      backend error appeared in either run.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
