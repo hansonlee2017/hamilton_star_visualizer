@@ -37,13 +37,13 @@ Deck layout (see the rails= values below for exact positions):
     below fill it.
   - A 60mL Hamilton reservoir (site 2 of its carrier) holding PicoGreen
     working solution.
-  - Three tip racks -- one 50uL, two 300uL (see ``fresh_tip_spots()``): a
+  - Two tip racks -- one 50uL, one 300uL (see ``fresh_tip_spots()``): a
     real protocol picks the smallest tip that comfortably holds a given
-    transfer, not one size for everything. A single 96-tip rack only has
-    12 columns, and at the maximum sample count this protocol can need up
-    to 13 fresh 300uL columns (1 for the dilution stage + up to 12 sample/
-    standard transfer stages) -- one more than a single rack provides, so
-    the 300uL tips get a second rack.
+    transfer, not one size for everything. Only the sample/standard
+    transfer (step 3 below) needs a fresh tip per column; the PicoGreen
+    transfer (step 2) reuses a single tip pick-up for its entire stage (see
+    that step), so even at the maximum sample count this protocol only
+    ever needs 2 fresh 300uL columns total -- nowhere near one rack's 12.
 
 Protocol:
   1. Prepare the standard curve. Diluent goes into every well but the top
@@ -67,11 +67,17 @@ Protocol:
      the one reservoir simultaneously (``spread="wide"``, PyLabRobot's own
      idiom for multiple channels sharing a single large container; see
      ``LiquidHandler.aspirate()``'s docstring), rather than separate
-     single-channel round trips.
+     single-channel round trips. One tip pick-up covers every column in
+     this stage -- the source (the reservoir) and the state of the
+     destination (always empty) never change, so there's nothing a fresh
+     tip would be protecting against.
   3. For those same columns, a transfer then moves the sample volume from
      the PCR plate on top -- the larger-volume reagent goes in first, so
      the small sample volume lands in (and mixes into) a substantial
-     existing volume rather than the other way around.
+     existing volume rather than the other way around. Unlike step 2, this
+     one *does* get a fresh tip per column: each column's source is a
+     different sample (or a different point on the standard curve), so
+     reusing a tip across them would carry residue from one into the next.
 
 Every transfer here is an ordinary ``LiquidHandler`` call -- no gantry-
 planning code in this file at all; see ``frontend/main.js``'s
@@ -148,8 +154,7 @@ class Resources:
   dna_stock: Tube
   te_diluent: Tube
   tip_rack_50uL: TipRack
-  tip_rack_300uL_a: TipRack
-  tip_rack_300uL_b: TipRack
+  tip_rack_300uL: TipRack
 
 
 def build_deck() -> Tuple[Deck, Resources]:
@@ -157,15 +162,17 @@ def build_deck() -> Tuple[Deck, Resources]:
 
   # 50uL tips for the 1-20uL sample/standard transfer; 300uL tips for
   # everything else (the 100-200uL dilution stage, and the 180-199uL
-  # PicoGreen transfer). Two 300uL racks -- see this module's docstring for
-  # why one (12 columns) isn't quite enough at the maximum sample count.
+  # PicoGreen transfer). Just one of each -- the PicoGreen transfer reuses
+  # a single tip pick-up across every column (see the reuse comment where
+  # that loop picks up tips, in main()) rather than one fresh column per
+  # transfer stage, so even at the maximum sample count this protocol only
+  # ever needs 2 fresh 300uL columns total (1 for the dilution stage, 1 for
+  # the whole PicoGreen stage) -- nowhere near one rack's 12.
   tip_carrier = TIP_CAR_480_A00(name="tip_carrier_1")
   tip_rack_50uL = hamilton_96_tiprack_50uL_filter(name="tip_rack_50uL")
-  tip_rack_300uL_a = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL_a")
-  tip_rack_300uL_b = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL_b")
+  tip_rack_300uL = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL")
   tip_carrier[0] = tip_rack_50uL
-  tip_carrier[1] = tip_rack_300uL_a
-  tip_carrier[2] = tip_rack_300uL_b
+  tip_carrier[1] = tip_rack_300uL
   deck.assign_child_resource(tip_carrier, rails=1)
 
   # Both the PCR sample plate and the Corning assay plate live on the same
@@ -202,8 +209,7 @@ def build_deck() -> Tuple[Deck, Resources]:
     dna_stock=dna_stock,
     te_diluent=te_diluent,
     tip_rack_50uL=tip_rack_50uL,
-    tip_rack_300uL_a=tip_rack_300uL_a,
-    tip_rack_300uL_b=tip_rack_300uL_b,
+    tip_rack_300uL=tip_rack_300uL,
   )
 
 
@@ -247,9 +253,11 @@ def _clamped_param(params: Dict[str, Any], key: str, default: float, lo: float, 
 def rack_column_stream(racks: List[TipRack]) -> Iterator[Tuple[TipRack, int]]:
   """Yield ``(rack, column)`` pairs across one or more same-size racks, one
   fresh column at a time -- moving on to the next rack once the current
-  one's 12 columns (a 96-tip rack only has 12, not enough on its own for
-  every fresh-tip pickup this protocol can need at the maximum sample
-  count -- see this module's docstring) are used up.
+  one's 12 columns (a 96-tip rack only has 12) are used up. Takes a list
+  so a caller with more fresh-tip pickups than one rack can hold isn't
+  stuck raising ``StopIteration``/a PLR "no tip" error partway through a
+  run; this protocol currently never needs more than one rack per tier
+  (see this module's docstring), but the stream doesn't assume that.
   """
 
   for rack in racks:
@@ -334,7 +342,7 @@ async def main() -> None:
 
     tip_streams = {
       "50": rack_column_stream([res.tip_rack_50uL]),
-      "300": rack_column_stream([res.tip_rack_300uL_a, res.tip_rack_300uL_b]),
+      "300": rack_column_stream([res.tip_rack_300uL]),
     }
 
     def fresh_tip_spots(tier: str, rows: str):
@@ -406,16 +414,65 @@ async def main() -> None:
     # volume lands in (and mixes into) a substantial existing volume,
     # rather than the other way around.
     transfer_groups = [*sample_groups, (STANDARD_COLUMN, ROWS)]
+
+    # One tip pick-up for this *entire* stage, reused across every column --
+    # unlike the sample/standard transfer below, every aspirate here draws
+    # from the same single reservoir and every dispense lands in a still-
+    # empty assay well, so there's no cross-contamination risk a fresh tip
+    # per column would be guarding against (real practice: reuse a tip
+    # freely when neither what it picks up nor what it lands in ever
+    # changes). Picked up for all 8 channels regardless of the first
+    # group's own size, since a later group may need more than an earlier
+    # partial one did.
     picogreen_tier = tier_for_volume(picogreen_volume)
+    await lh.pick_up_tips(fresh_tip_spots(picogreen_tier, ROWS))
+
+    # Real STARBackend.aspirate()/dispense() kwargs -- minimum_traverse_
+    # height_at_beginning_of_a_command (how high to rise before moving in
+    # X/Y) and min_z_endpos (how high to retract to afterward). Both
+    # default, on real hardware, to a conservative global "clear the whole
+    # deck" height (STARBackend's own default is 245mm); this loop never
+    # needs that much clearance, since the reservoir every aspirate here
+    # draws from never moves and the assay plate every dispense lands on is
+    # a single flat labware -- each only needs to clear its *own* rim, not
+    # the whole deck. Grounded in this run's actual resources, not guessed:
+    # each resource's own real top surface plus a small clearance margin.
+    # A demo-only quirk: LiquidHandlerChatterboxBackend has no motion model
+    # to begin with (it just prints a table row -- see chatterbox.py), so
+    # this has no effect on how long the *backend* call takes here or on a
+    # real robot's *pipetting* time either; it's genuinely a real-hardware
+    # optimization for the seconds a physical arm would otherwise spend
+    # traveling to and from a needlessly high safe height between transfers.
+    # The visualizer *does* render it, though -- see events.py's
+    # channel_ops_event() and frontend/main.js's animateChannelOp() for the
+    # rest of this path.
+    TRAVERSE_CLEARANCE_MM = 5.0
+    reservoir_traverse_height = res.picogreen_reservoir.get_absolute_location(z="top").z + TRAVERSE_CLEARANCE_MM
+    assay_plate_traverse_height = res.assay_plate.get_absolute_location(z="top").z + TRAVERSE_CLEARANCE_MM
+
     for col, rows in transfer_groups:
       n = len(rows)
       dest_wells = res.assay_plate[f"{rows[0]}{col}:{rows[-1]}{col}"]
-      await lh.pick_up_tips(fresh_tip_spots(picogreen_tier, rows))
-      await lh.aspirate([res.picogreen_reservoir] * n, vols=[picogreen_volume] * n, spread="wide")
-      await lh.dispense(dest_wells, vols=[picogreen_volume] * n)
-      await lh.discard_tips()
+      await lh.aspirate(
+        [res.picogreen_reservoir] * n,
+        vols=[picogreen_volume] * n,
+        spread="wide",
+        minimum_traverse_height_at_beginning_of_a_command=reservoir_traverse_height,
+        min_z_endpos=reservoir_traverse_height,
+      )
+      await lh.dispense(
+        dest_wells,
+        vols=[picogreen_volume] * n,
+        minimum_traverse_height_at_beginning_of_a_command=assay_plate_traverse_height,
+        min_z_endpos=assay_plate_traverse_height,
+      )
       await asyncio.sleep(0.3)
+    await lh.discard_tips()
 
+    # Samples/standards *do* need a fresh tip per column -- each one is a
+    # different source (a different sample, or a different point on the
+    # standard curve), so reusing a tip across them would carry residue
+    # from one into the next.
     sample_tier = tier_for_volume(sample_volume)
     for col, rows in transfer_groups:
       n = len(rows)

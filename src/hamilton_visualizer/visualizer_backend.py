@@ -221,7 +221,18 @@ class VisualizerBackend(LiquidHandlerBackend):
     self, ops: List[SingleChannelAspiration], use_channels: List[int], **backend_kwargs
   ) -> None:
     await self._inner.aspirate(ops, use_channels, **backend_kwargs)
-    event = channel_ops_event("aspirate", ops, use_channels, volume_attr="volume")
+    # Real STARBackend.aspirate() kwargs (see channel_ops_event()'s
+    # docstring) -- peeked at, not popped, so the full **backend_kwargs
+    # (including these two) still reaches self._inner above unchanged, the
+    # same as every other kwarg this method doesn't specifically care about.
+    event = channel_ops_event(
+      "aspirate",
+      ops,
+      use_channels,
+      volume_attr="volume",
+      traverse_height_mm=backend_kwargs.get("minimum_traverse_height_at_beginning_of_a_command"),
+      end_height_mm=backend_kwargs.get("min_z_endpos"),
+    )
     self._sync_state_cache(event)
     await self._server.broadcast(event)
 
@@ -229,7 +240,14 @@ class VisualizerBackend(LiquidHandlerBackend):
     self, ops: List[SingleChannelDispense], use_channels: List[int], **backend_kwargs
   ) -> None:
     await self._inner.dispense(ops, use_channels, **backend_kwargs)
-    event = channel_ops_event("dispense", ops, use_channels, volume_attr="volume")
+    event = channel_ops_event(
+      "dispense",
+      ops,
+      use_channels,
+      volume_attr="volume",
+      traverse_height_mm=backend_kwargs.get("minimum_traverse_height_at_beginning_of_a_command"),
+      end_height_mm=backend_kwargs.get("min_z_endpos"),
+    )
     self._sync_state_cache(event)
     await self._server.broadcast(event)
 

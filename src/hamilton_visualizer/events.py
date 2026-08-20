@@ -113,6 +113,8 @@ def channel_ops_event(
   use_channels: Sequence[int],
   *,
   volume_attr: Optional[str] = None,
+  traverse_height_mm: Optional[float] = None,
+  end_height_mm: Optional[float] = None,
 ) -> Dict[str, Any]:
   """Build a ``{"type": "op", ...}`` event for a per-channel pipetting call
   (pick_up_tips / drop_tips / aspirate / dispense).
@@ -122,6 +124,17 @@ def channel_ops_event(
   ``resource_max_volume``) -- see the comment above the block that computes
   them for why this exists instead of relying on the separate live "state"
   broadcast for these two resource categories.
+
+  ``traverse_height_mm``/``end_height_mm`` mirror STARBackend.aspirate()/
+  dispense()'s real ``minimum_traverse_height_at_beginning_of_a_command``/
+  ``min_z_endpos`` -- one value for the *whole* multi-channel command, not
+  per-channel (that's genuinely how the Hamilton firmware command works:
+  one shared arm-height for every channel moving together), so these land
+  as top-level fields on the event rather than inside each channel entry.
+  ``None`` (the default -- most callers never set the underlying backend
+  kwargs) omits both fields entirely, so an event with neither key means
+  "use whatever height the frontend already defaults to," identical to
+  every op before this parameter existed.
   """
 
   channels: List[Dict[str, Any]] = []
@@ -187,7 +200,12 @@ def channel_ops_event(
         entry["resource_max_volume"] = getattr(op.resource, "max_volume", None)
 
     channels.append(entry)
-  return {"type": "op", "op": op_name, "channels": channels}
+  event: Dict[str, Any] = {"type": "op", "op": op_name, "channels": channels}
+  if traverse_height_mm is not None:
+    event["traverse_height_mm"] = round(traverse_height_mm, 2)
+  if end_height_mm is not None:
+    event["end_height_mm"] = round(end_height_mm, 2)
+  return event
 
 
 def resource_event(

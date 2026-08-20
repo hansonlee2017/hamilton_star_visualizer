@@ -780,10 +780,10 @@ function createFlowTexture(lightColor, darkColor) {
   return texture;
 }
 // Aspirate (liquid entering the tip) and dispense (leaving it) get their
-// own colors -- orange vs. blue -- so which direction a channel's mid-flow
+// own colors -- red vs. blue -- so which direction a channel's mid-flow
 // pulse is doing is readable from the color alone, not just the scroll
 // direction (subtle at a glance, especially at a distance or mid-animation).
-const FLOW_TEXTURE_ASPIRATE = createFlowTexture("#ffe3bf", "#c4752f");
+const FLOW_TEXTURE_ASPIRATE = createFlowTexture("#ffd6d6", "#c73a3a");
 const FLOW_TEXTURE_DISPENSE = createFlowTexture("#bfeaff", "#2f8fc4");
 const FLOW_PULSE_MS = 550;
 
@@ -878,7 +878,7 @@ class Channel {
   }
 
   // direction: +1 to scroll "up" (aspirate -- liquid entering the tip,
-  // orange), -1 to scroll "down" (dispense -- liquid leaving it, blue).
+  // red), -1 to scroll "down" (dispense -- liquid leaving it, blue).
   flowPulse(direction) {
     const material = this.tipMesh.material;
     const restoreColor = material.color.clone();
@@ -1007,13 +1007,28 @@ const RETRACT_MS = 350;
 let durationScale = 1;
 const scaled = (ms) => ms * durationScale;
 
+// Shortest sensible rise/retract leg once a custom traverse/end height
+// pushes its nominal duration toward zero (see animateChannelOp's
+// riseMs/retractMs) -- keeps a genuinely tiny move visibly a *move*,
+// never a same-frame teleport, however aggressive the height override.
+const MIN_LEG_MS = 40;
+
 // `tipLength`: override for the pick_up_tips case, where the tip that
 // matters for this op's clearance is the one about to be grabbed (from the
 // op event's tip_length_mm), not whatever this channel was last carrying --
 // see events.py's tip_length_mm comment. Every other op omits it and falls
 // back to the channel's own remembered `tipLength` (set by its last
 // pick-up), since it's still carrying that same tip throughout.
-function animateChannelOp(entry, { onArrive, tipLength } = {}) {
+//
+// `traverseHeightMm`/`endHeightMm`: real STARBackend.aspirate()/dispense()
+// kwargs (minimum_traverse_height_at_beginning_of_a_command/min_z_endpos --
+// see events.py's channel_ops_event() docstring), forwarded here only when
+// a protocol script actually set them (e.g. picogreen_demo.py's repeated
+// same-spot reservoir aspirate, which doesn't need to rise all the way to
+// restZ since it's not going anywhere else). `undefined` for every other
+// op behaves exactly as before this parameter existed -- rise to and
+// retract from the global restZ, full RISE_MS/RETRACT_MS.
+function animateChannelOp(entry, { onArrive, tipLength, traverseHeightMm, endHeightMm } = {}) {
   const ch = channels[entry.channel];
   if (!ch) return;
   // `entry.z` (from the server) is where the *tip's point* should end up --
@@ -1025,6 +1040,24 @@ function animateChannelOp(entry, { onArrive, tipLength } = {}) {
   // fixes). A function, not a number: see enqueue()'s docstring for why
   // `ch.tipLength` must be read when the leg *starts*, not now.
   const targetZ = () => entry.z + (tipLength ?? ch.tipLength);
+
+  // A custom height only ever means "don't go all the way up to restZ" --
+  // never above it (a channel should never need to clear more than the
+  // deck's own tallest labware) and never below this op's own working
+  // depth (it still has to reach entry.z to do anything). Clamping first,
+  // then measuring this leg's actual span as a fraction of the *nominal*
+  // full span (working depth -> restZ) gives a duration that's
+  // proportionally shorter the less far this leg actually has to travel --
+  // 1.0 (the full RISE_MS/RETRACT_MS, unchanged from before this existed)
+  // whenever no override is given, since riseZ/retractZ then just equal
+  // restZ and the fraction is exactly 1.
+  const nominalSpan = Math.max(1, restZ - entry.z);
+  const clampHeight = (h) => Math.min(restZ, Math.max(entry.z, h));
+  const riseZ = traverseHeightMm != null ? clampHeight(traverseHeightMm) : restZ;
+  const retractZ = endHeightMm != null ? clampHeight(endHeightMm) : restZ;
+  const riseMs = Math.max(MIN_LEG_MS, scaled(RISE_MS) * ((riseZ - entry.z) / nominalSpan));
+  const retractMs = Math.max(MIN_LEG_MS, scaled(RETRACT_MS) * ((retractZ - entry.z) / nominalSpan));
+
   // x/y: null means "stay wherever this leg actually starts" -- see
   // enqueue()'s docstring for why that can't just be ch.pos.x/y here.
   // Real Hamilton STAR motion order -- the shared-x arm moves first, then
@@ -1033,14 +1066,14 @@ function animateChannelOp(entry, { onArrive, tipLength } = {}) {
   // planGantryPasses() below for the same "x is shared, y is per-channel"
   // fact applied *across* channels, not just within one channel's own
   // approach.
-  ch.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
-  ch.enqueue({ x: entry.x, y: null, z: restZ }, scaled(X_MOVE_MS));
-  ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, scaled(Y_MOVE_MS));
+  ch.enqueue({ x: null, y: null, z: riseZ }, riseMs);
+  ch.enqueue({ x: entry.x, y: null, z: riseZ }, scaled(X_MOVE_MS));
+  ch.enqueue({ x: entry.x, y: entry.y, z: riseZ }, scaled(Y_MOVE_MS));
   // onArrive fires exactly when this leg's tween completes -- see enqueue()'s
   // docstring for why that's not the same as a fixed setTimeout delay.
   ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(DESCEND_MS), onArrive);
   ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(HOLD_MS));
-  ch.enqueue({ x: entry.x, y: entry.y, z: restZ }, scaled(RETRACT_MS));
+  ch.enqueue({ x: entry.x, y: entry.y, z: retractZ }, retractMs);
 }
 
 // Hamilton STAR's standard channel spacing -- also the minimum center-to-
@@ -1243,13 +1276,15 @@ function flashResource(resourceName) {
 // planGantryPasses() -- shared by pick_up_tips/drop_tips/aspirate/dispense
 // below, which differ only in each active entry's onArrive effect.
 // `makeOnArrive(entry)` builds that per-entry callback.
-function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor } = {}) {
+function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor, traverseHeightMm, endHeightMm } = {}) {
   for (const pass of planGantryPasses(entries)) {
     for (const [ch, y] of pass.idleMoves) nudgeChannel(ch, pass.x, y);
     for (const entry of pass.active) {
       animateChannelOp(entry, {
         onArrive: makeOnArrive(entry),
         tipLength: tipLengthFor ? tipLengthFor(entry) : undefined,
+        traverseHeightMm,
+        endHeightMm,
       });
     }
   }
@@ -1284,16 +1319,24 @@ function handleOpEvent(msg) {
       // Liquid flows "up" into the tip on aspirate, "down" out of it on
       // dispense -- see Channel.flowPulse().
       const flowDirection = msg.op === "aspirate" ? 1 : -1;
-      animateChannelGroupOp(msg.channels, (entry) => () => {
-        channels[entry.channel]?.pulse();
-        channels[entry.channel]?.flowPulse(flowDirection);
-        // Apply the real color *before* flashing -- flashResource()
-        // captures whatever color is current as what to revert to, so
-        // flashing first would revert back to the stale pre-dispense
-        // shade instead of the one we just set.
-        applyEmbeddedResourceState(entry);
-        flashResource(entry.resource);
-      });
+      animateChannelGroupOp(
+        msg.channels,
+        (entry) => () => {
+          channels[entry.channel]?.pulse();
+          channels[entry.channel]?.flowPulse(flowDirection);
+          // Apply the real color *before* flashing -- flashResource()
+          // captures whatever color is current as what to revert to, so
+          // flashing first would revert back to the stale pre-dispense
+          // shade instead of the one we just set.
+          applyEmbeddedResourceState(entry);
+          flashResource(entry.resource);
+        },
+        // Only present when the protocol script actually set the
+        // underlying STARBackend kwargs (see events.py's
+        // channel_ops_event() docstring) -- undefined otherwise, which
+        // animateChannelOp() already treats as "use restZ, unchanged."
+        { traverseHeightMm: msg.traverse_height_mm, endHeightMm: msg.end_height_mm }
+      );
       logEvent(
         msg.op,
         msg.channels.map((c) => `p${c.channel}:${c.resource} (${c.volume}µL)`).join(", ")

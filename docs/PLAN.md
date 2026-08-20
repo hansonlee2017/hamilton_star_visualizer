@@ -1353,6 +1353,108 @@ User request: change the aspiration flow color from blue to orange.
       (`#c57833`, matching the new orange stops exactly) -- not just "some
       color changed," the literal on-screen pixels for each direction.
 
+## Review round 22 (2026-08-19)
+
+Three requests: reuse tips during the PicoGreen working-solution dispense
+(nothing in the assay plate to contaminate); change the aspirate flow color
+from orange to red; and, after establishing that real PyLabRobot traverse-
+height kwargs exist but have no effect under this project's Chatterbox
+backend or fixed-duration frontend animation, actually wire them through so
+the visualizer *does* show a difference when a protocol requests a shorter
+rise/retract.
+
+- [x] **PicoGreen tip reuse.** One tip pick-up now covers the *entire*
+      PicoGreen stage instead of one fresh pick-up/discard per column --
+      every aspirate draws from the same single reservoir and every
+      dispense lands in a still-empty assay well, so there's no cross-
+      contamination risk a fresh tip would guard against (unlike the
+      sample/standard transfer loop right after it, which still gets a
+      fresh tip per column since each source there really is different).
+      This incidentally erased the round-19 tip-rack-capacity problem it
+      was fixing: with reuse, the PicoGreen stage only ever needs 1 fresh
+      300uL column total (not up to 12), so the whole run only ever needs
+      2 (1 there + 1 for the dilution stage) -- nowhere near a single
+      rack's 12. Removed the now-unnecessary second 300uL rack
+      (`tip_rack_300uL_b`) added in round 19, restoring a 2-rack deck.
+
+      Verified live at 88 samples/20uL (the case that used to need up to
+      13 columns): grepping the two 300uL tip-column pickups (dilution +
+      the single PicoGreen pick-up) confirmed exactly 16 tip-spot mentions
+      total (2 columns x 8 channels) across the whole run, and the
+      protocol still finished with every volume exactly matching hand-
+      derived expectations.
+- [x] **Aspirate color: orange -> red.** `FLOW_TEXTURE_ASPIRATE`'s gradient
+      stops changed from `#ffe3bf`/`#c4752f` to `#ffd6d6`/`#c73a3a`.
+
+      Verified live with the same pixel-sampling technique as round 21
+      (screenshotting a ~550ms pulse reliably isn't worth the attempts):
+      polled a live run's channel tip materials and read back
+      `rgb(200,62,62)` for an active aspirate pulse -- unambiguously red,
+      not orange -- while dispense still read back the unchanged
+      `rgb(51,145,197)` blue.
+- [x] **Real traverse-height kwargs, actually wired through to the
+      animation.** Research first (see the "Speed research" discussion
+      this round is based on): `STARBackend.aspirate()`/`dispense()` both
+      accept real Hamilton firmware kwargs --
+      `minimum_traverse_height_at_beginning_of_a_command` (rise-to height
+      before a command) and `min_z_endpos` (retract-to height after) --
+      defaulting to a conservative global `_channel_traversal_height`
+      (245mm) that PLR itself overrides down in at least one place ("we
+      don't want to move channels up, we are already above the liquid").
+      A real, legitimate optimization -- but inert in this project as
+      found: `LiquidHandlerChatterboxBackend` has no motion/timing model
+      at all (just prints a table row), and the frontend's rise/retract
+      legs used a single fixed `restZ` target with fixed `RISE_MS`/
+      `RETRACT_MS` durations, never reading anything from the op event
+      that could change either. Passing the kwargs through unchanged
+      would've been pure decoration -- extra printed Chatterbox columns,
+      nothing else.
+
+      Wired for real instead: `picogreen_demo.py`'s PicoGreen loop now
+      passes both kwargs on its aspirate (reservoir -- never moves) and
+      dispense (assay plate) calls, computed from each resource's own
+      `get_absolute_location(z="top")` plus a 5mm clearance margin, not
+      guessed constants. `VisualizerBackend.aspirate()`/`dispense()` peek
+      (not pop) `minimum_traverse_height_at_beginning_of_a_command`/
+      `min_z_endpos` out of `**backend_kwargs` and hand them to
+      `events.py`'s `channel_ops_event()`, which embeds them as top-level
+      `traverse_height_mm`/`end_height_mm` fields on the "op" event (one
+      value for the whole multi-channel command, matching the real
+      firmware semantics -- not per-channel). `None` (the default -- every
+      other call site) omits both fields entirely, so every op that
+      doesn't set these kwargs is byte-for-byte unaffected.
+      `animateChannelOp()` now rises to and retracts from these heights
+      instead of the fixed `restZ` when present, clamped to
+      `[entry.z, restZ]`, *and* scales `RISE_MS`/`RETRACT_MS` by what
+      fraction of the nominal working-depth-to-restZ span this op's height
+      actually needs (floored at `MIN_LEG_MS=40` so an aggressive override
+      never collapses to a literal same-frame teleport) -- a lower
+      traverse height is both visibly lower and measurably faster, not
+      just geometrically different.
+
+      Verified live end-to-end, including through a full Reset cycle
+      (proving the heights are recomputed fresh from the *new* deck's
+      resources each run, not cached): captured real "op" events via a
+      raw websocket replay and confirmed `traverse_height_mm`/
+      `end_height_mm` on the PicoGreen reservoir aspirate read exactly
+      `234` (`229.0` real top + 5mm) and on the assay-plate dispense read
+      exactly `202.32` (`197.32` real top + 5mm) -- both matching the
+      hand-derived resource geometry exactly, identically on a second run
+      after Reset. Confirmed a freshly-parked channel's rest height is
+      `384.95mm`, well above both overrides, so the reduction is real, not
+      a no-op clamp. Computed the resulting durations by hand from the
+      captured working depths: the reservoir aspirate's rise/retract drops
+      from 350ms to ~100ms (a ~71% reduction), the assay-plate dispense's
+      drops to the 40ms floor (~89%), while the untouched sample/standard
+      loop's ops still take the full 350ms.
+      Also found (via this session's own diagnostic websocket testing, not
+      part of this feature) a pre-existing gap where an abrupt client
+      disconnect mid-replay can raise an uncaught `RuntimeError` in
+      `server.py`'s websocket loop instead of being caught like a normal
+      `WebSocketDisconnect` -- flagged as a separate background task
+      rather than fixed here, since it's unrelated to what this round
+      changed.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
