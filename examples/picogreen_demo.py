@@ -3,7 +3,11 @@
 into an assay plate and add PicoGreen working reagent to each.
 
 Two run parameters are entered in the visualizer's HUD, next to "Start
-Protocol", instead of being hardcoded (see index.html's ``#run-params``):
+Protocol", instead of being hardcoded -- declared via
+``VisualizerServer.set_run_params()`` below (see that method's docstring
+for the field schema; this is the one demo in the repo that uses it, which
+is exactly why the HUD row doesn't hardcode these fields for every other
+script to carry around unused -- see docs/PLAN.md's "Review round 30"):
 
   - **Sample volume** (1-20uL): how much sample/standard goes into each
     assay well. PicoGreen working solution then makes up the rest of a
@@ -142,13 +146,16 @@ ROWS = "ABCDEFGH"
 DILUTION_VOLUME = 100.0  # uL per standard-curve well, fixed regardless of run params
 
 # Every assay well ends up at this total volume -- PicoGreen working
-# solution makes up whatever the sample volume doesn't. Matches
-# frontend/main.js's ASSAY_TOTAL_VOLUME_UL (the HUD's derived readout).
+# solution makes up whatever the sample volume doesn't. Passed to
+# server.set_run_params() below as the "picogreen_readout" computed
+# field's `total`, so the HUD's derived readout comes from this same
+# constant instead of a separately hardcoded one in the frontend.
 ASSAY_TOTAL_VOLUME_UL = 200.0
 
-# Matches index.html's #sample-volume-input/#sample-count-input min/max/
-# value attributes -- kept in sync by hand, same as every other place a
-# real quantity appears in both the Python protocol and the JS HUD.
+# Passed to server.set_run_params() below as the "sample_volume_ul"/
+# "sample_count" fields' min/max/default -- the HUD inputs it produces are
+# built from these directly (see main()), not a separate hardcoded copy in
+# index.html, so there's nothing to keep in sync by hand.
 MIN_SAMPLE_VOLUME_UL, MAX_SAMPLE_VOLUME_UL, DEFAULT_SAMPLE_VOLUME_UL = 1.0, 20.0, 5.0
 # 88 = 11 full columns of 8 -- the most that still leaves column 12 free
 # for the standard curve (see sample_column_groups()).
@@ -293,6 +300,52 @@ async def main() -> None:
   # this way, for free, the same way restarting the whole script would give
   # you, just without actually restarting the process or the HTTP server.
   while True:
+    # Declared fresh every pass -- reset_for_new_run() clears the server's
+    # previous fields (same as it clears the scene), so this demo's HUD
+    # inputs would silently disappear after the first "Reset" without it.
+    await server.set_run_params(
+      [
+        {
+          "id": "sample_volume_ul",
+          "label": "Sample",
+          "type": "number",
+          "min": MIN_SAMPLE_VOLUME_UL,
+          "max": MAX_SAMPLE_VOLUME_UL,
+          "step": 1,
+          "default": DEFAULT_SAMPLE_VOLUME_UL,
+          "suffix": "µL",
+          "title": (
+            f"uL of sample mixed into each assay well "
+            f"({MIN_SAMPLE_VOLUME_UL:g}-{MAX_SAMPLE_VOLUME_UL:g})"
+          ),
+        },
+        {
+          "id": "sample_count",
+          "label": "×",
+          "type": "number",
+          "min": MIN_SAMPLE_COUNT,
+          "max": MAX_SAMPLE_COUNT,
+          "step": 1,
+          "default": DEFAULT_SAMPLE_COUNT,
+          "title": (
+            "How many samples to run, placed column-wise on the sample plate "
+            f"starting at A1 ({MIN_SAMPLE_COUNT}-{MAX_SAMPLE_COUNT})"
+          ),
+        },
+        {
+          # `of` must name a "number" field appearing earlier in this same
+          # list (see set_run_params()'s docstring) -- "sample_volume_ul"
+          # above satisfies that.
+          "id": "picogreen_readout",
+          "type": "computed",
+          "basis": "picogreen_working_solution",
+          "of": "sample_volume_ul",
+          "total": ASSAY_TOTAL_VOLUME_UL,
+          "title": "PicoGreen working solution per well: 200uL total - sample volume",
+        },
+      ]
+    )
+
     deck, res = build_deck()
 
     inner_backend = LiquidHandlerChatterboxBackend(num_channels=8)

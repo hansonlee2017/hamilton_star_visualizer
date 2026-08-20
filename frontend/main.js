@@ -157,21 +157,66 @@ const replayBtn = document.getElementById("replay-btn");
 const startBtn = document.getElementById("start-btn");
 const resetBtn = document.getElementById("reset-btn");
 const speedSelect = document.getElementById("speed-select");
-const sampleVolumeInput = document.getElementById("sample-volume-input");
-const sampleCountInput = document.getElementById("sample-count-input");
-const picogreenReadoutEl = document.getElementById("picogreen-readout");
+const runParamsEl = document.getElementById("run-params");
 
-// PicoGreen working solution is always however much of a 200uL total assay
-// well isn't sample -- a derived readout, not its own input (see
-// examples/picogreen_demo.py's docstring for the assay-chemistry reason a
-// fixed 200uL total makes sense).
-const ASSAY_TOTAL_VOLUME_UL = 200;
-function updatePicogreenReadout() {
-  const sampleVol = Number(sampleVolumeInput.value) || 0;
-  picogreenReadoutEl.textContent = `PicoGreen ${ASSAY_TOTAL_VOLUME_UL - sampleVol}µL`;
+// Populated by renderRunParams() from the server's "run_params" message --
+// most demos never send any fields (see server.py's set_run_params()
+// docstring), in which case this stays empty and #run-params stays hidden
+// (its CSS default -- see index.html). `runParamFields` is the field-spec
+// list itself (needed at Start-click time for id/min/max/default);
+// `runParamInputs` maps field id -> its rendered <input>, for every
+// editable ("number") field currently shown.
+let runParamFields = [];
+const runParamInputs = new Map();
+
+// Builds the HUD's run-params row generically from the server-declared
+// field list -- see server.py's set_run_params() docstring for the exact
+// schema. Two field types: "number" (an editable input, its value read
+// back into the params dict when "Start Protocol" is clicked) and
+// "computed" (a read-only derived readout; currently only
+// "picogreen_working_solution", what picogreen_demo.py's "PicoGreen 195uL"
+// readout uses -- an unrecognized `basis` is simply not rendered, so this
+// can grow new computed kinds without breaking older ones). A "computed"
+// field's `of` must name a "number" field appearing *earlier* in the same
+// list, since fields are rendered in a single top-to-bottom pass.
+function renderRunParams(fields) {
+  runParamsEl.innerHTML = "";
+  runParamInputs.clear();
+  runParamFields = fields || [];
+  runParamsEl.classList.toggle("visible", runParamFields.length > 0);
+
+  for (const field of runParamFields) {
+    if (field.type === "number") {
+      const label = document.createElement("label");
+      if (field.title) label.title = field.title;
+      label.appendChild(document.createTextNode(field.label ?? field.id));
+      const input = document.createElement("input");
+      input.type = "number";
+      if (field.min != null) input.min = field.min;
+      if (field.max != null) input.max = field.max;
+      input.step = field.step ?? 1;
+      input.value = field.default ?? field.min ?? 0;
+      label.appendChild(input);
+      if (field.suffix) label.appendChild(document.createTextNode(field.suffix));
+      runParamsEl.appendChild(label);
+      runParamInputs.set(field.id, input);
+    } else if (field.type === "computed") {
+      const span = document.createElement("span");
+      span.className = "readout";
+      if (field.title) span.title = field.title;
+      runParamsEl.appendChild(span);
+      const sourceInput = runParamInputs.get(field.of);
+      const update = () => {
+        if (field.basis === "picogreen_working_solution") {
+          const sampleVol = sourceInput ? Number(sourceInput.value) || 0 : 0;
+          span.textContent = `PicoGreen ${(field.total ?? 0) - sampleVol}µL`;
+        }
+      };
+      if (sourceInput) sourceInput.addEventListener("input", update);
+      update();
+    }
+  }
 }
-sampleVolumeInput.addEventListener("input", updatePicogreenReadout);
-updatePicogreenReadout();
 
 replayBtn.addEventListener("click", () => {
   if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
@@ -188,22 +233,28 @@ replayBtn.addEventListener("click", () => {
 // the run finished (see that handler below) -- unlike the params, which
 // stay locked until a Reset actually starts a new run.
 function lockForRun() {
-  sampleVolumeInput.disabled = true;
-  sampleCountInput.disabled = true;
+  for (const input of runParamInputs.values()) input.disabled = true;
   replayBtn.disabled = true;
 }
 
 startBtn.addEventListener("click", () => {
   if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
-  const params = {
-    // Clamp client-side to the ranges the demo documents (1-20uL sample,
-    // 1-88 samples -- 88 = 11 full columns of 8, leaving column 12 free for
-    // the standard curve); the server also ignores a second "start_protocol"
-    // once one's been accepted, so a stale/hand-crafted message here can't
-    // change an already-running protocol's params either way.
-    sample_volume_ul: Math.min(20, Math.max(1, Math.round(Number(sampleVolumeInput.value) || 5))),
-    sample_count: Math.min(88, Math.max(1, Math.round(Number(sampleCountInput.value) || 24))),
-  };
+  // Clamp client-side to each field's declared min/max/default (see
+  // server.py's set_run_params() docstring); the server also ignores a
+  // second "start_protocol" once one's been accepted, so a stale/hand-
+  // crafted message here can't change an already-running protocol's
+  // params either way.
+  const params = {};
+  for (const field of runParamFields) {
+    if (field.type !== "number") continue;
+    const input = runParamInputs.get(field.id);
+    if (!input) continue;
+    const raw = Number(input.value);
+    let value = Number.isFinite(raw) ? raw : field.default ?? field.min ?? 0;
+    if (field.min != null) value = Math.max(field.min, value);
+    if (field.max != null) value = Math.min(field.max, value);
+    params[field.id] = Math.round(value);
+  }
   currentWs.send(JSON.stringify({ action: "start_protocol", params }));
   // Optimistically reflect it immediately; the server's own
   // "start_status" broadcast (sent to every connected client, including
@@ -211,7 +262,10 @@ startBtn.addEventListener("click", () => {
   startBtn.disabled = true;
   startBtn.classList.add("started");
   lockForRun();
-  logEvent("start", `protocol started (${params.sample_count} samples, ${params.sample_volume_ul}uL each)`);
+  const detail = Object.entries(params)
+    .map(([id, value]) => `${id}=${value}`)
+    .join(", ");
+  logEvent("start", detail ? `protocol started (${detail})` : "protocol started");
 });
 
 resetBtn.addEventListener("click", () => {
@@ -1464,6 +1518,8 @@ function connect() {
     if (msg.type === "scene") {
       loadScene(msg.deck);
       ensureChannels(msg.num_channels ?? NUM_CHANNELS_DEFAULT);
+    } else if (msg.type === "run_params") {
+      renderRunParams(msg.fields);
     } else if (msg.type === "state") {
       applyState(msg.resource, msg.state);
       window.__lastStateMessages = window.__lastStateMessages || [];
@@ -1489,8 +1545,7 @@ function connect() {
       // put the whole HUD back to its pre-run state. The next "scene"
       // message (once the new run's lh.setup() fires) rebuilds the 3D
       // scene itself; this just resets the controls and log around it.
-      sampleVolumeInput.disabled = false;
-      sampleCountInput.disabled = false;
+      for (const input of runParamInputs.values()) input.disabled = false;
       startBtn.disabled = false;
       startBtn.classList.remove("started");
       resetBtn.disabled = true;

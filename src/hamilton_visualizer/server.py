@@ -19,7 +19,7 @@ import logging
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, Optional, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -70,6 +70,10 @@ class VisualizerServer:
     self._send_locks: Dict[WebSocket, asyncio.Lock] = {}
     self._scene: Optional[Dict[str, Any]] = None
     self._num_channels: Optional[int] = None
+    # Opt-in HUD run-param fields (see set_run_params()) -- empty means "no
+    # protocol-specific inputs," which is most demos; the HUD row stays
+    # hidden entirely rather than showing inputs a script never reads.
+    self._run_params_fields: List[Dict[str, Any]] = []
     # resource name -> its most recent "state" event, so a client connecting
     # *after* e.g. a tip rack's initial "these spots have tips" broadcast
     # (which happens once, synchronously, during setup() -- often well
@@ -134,6 +138,10 @@ class VisualizerServer:
           await self._send(
             websocket, {"type": "scene", "deck": self._scene, "num_channels": self._num_channels}
           )
+        # Always sent, even when empty -- an empty list is what tells a
+        # newly-connecting client's HUD to *not* render the run-params row,
+        # same as every other client currently sees (see set_run_params()).
+        await self._send(websocket, {"type": "run_params", "fields": self._run_params_fields})
         for state_event in self._latest_state.values():
           await self._send(websocket, state_event)
         await self._send(websocket, {"type": "start_status", "started": self._start_event.is_set()})
@@ -256,9 +264,40 @@ class VisualizerServer:
     self._reset_event.clear()
     self._scene = None
     self._num_channels = None
+    self._run_params_fields = []
     self._latest_state.clear()
     self._events.clear()
     await self.broadcast({"type": "reset"})
+
+  async def set_run_params(self, fields: List[Dict[str, Any]]) -> None:
+    """Declare this protocol's own HUD input fields (opt-in -- most demos
+    never call this, and the HUD's run-params row stays hidden for them,
+    see index.html's ``#run-params`` CSS).
+
+    Call once, any time before the browser might connect (typically right
+    after :meth:`start`, alongside :meth:`set_scene`). ``fields`` is a list
+    of plain dicts the frontend renders generically -- see
+    ``frontend/main.js``'s ``renderRunParams()`` for the exact schema, but
+    in short: ``{"type": "number", "id", "label", "min", "max", "step",
+    "default", "suffix"}`` for an editable input (its current value is
+    read back into :meth:`wait_for_start`'s returned params dict, keyed by
+    ``id``, when "Start Protocol" is clicked), or ``{"type": "computed",
+    "basis": ..., ...}`` for a derived, read-only readout the frontend
+    knows how to compute (currently just ``"picogreen_working_solution"``,
+    what ``picogreen_demo.py`` uses for its "PicoGreen 195uL" readout) --
+    unrecognized ``basis`` values are simply not rendered, so this can grow
+    new computed kinds without breaking older ones.
+
+    This intentionally isn't a general form/formula system: it's exactly
+    general enough to describe the one demo (picogreen_demo.py) that has
+    ever needed protocol-specific inputs, without hardcoding *that* demo's
+    fields into the shared frontend for every other script to carry around
+    unused (see docs/PLAN.md's "Review round 30" for the "why does this
+    show up for every demo" complaint this replaced).
+    """
+
+    self._run_params_fields = fields
+    await self.broadcast({"type": "run_params", "fields": fields})
 
   async def set_scene(self, scene: Dict[str, Any], *, num_channels: int) -> None:
     """Cache the deck scene graph and push it to every connected client.

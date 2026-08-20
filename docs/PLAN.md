@@ -1915,6 +1915,59 @@ verified; all are covered below.
       returns precisely what it aspirates but doesn't deliver, not merely
       "approximately".
 
+## Review round 31 (2026-08-19)
+
+User follow-up to round 30's "answered, not changed" item: actually fix
+the PicoGreen-specific run-params HUD showing up for every demo.
+
+- [x] **`VisualizerServer.set_run_params()`, a small opt-in mechanism, not a
+      full form/formula system.** A protocol script now declares its own
+      HUD input fields (a plain list of dicts -- see the method's
+      docstring for the exact schema) instead of the frontend hardcoding
+      one fixed pair of inputs for every script. Two field types only:
+      `"number"` (an editable input, its value read back into
+      `wait_for_start()`'s returned params dict by `id` when "Start
+      Protocol" is clicked) and `"computed"` (a read-only derived readout;
+      currently just `"picogreen_working_solution"`, the one
+      `picogreen_demo.py` needs -- an unrecognized `basis` is simply not
+      rendered, so this can grow new computed kinds later without breaking
+      older ones). Declaring nothing (every demo but one) leaves the HUD's
+      `#run-params` row hidden entirely (`display: none` by default in
+      `index.html`'s CSS, toggled to `.visible` only once fields arrive) --
+      the user picked this "minimal: hide it when unused" scope explicitly
+      over a fully generic declarative-form system, since only one demo
+      has ever needed protocol-specific inputs.
+- [x] **`frontend/main.js` renders the HUD generically.** The two hardcoded
+      DOM refs (`sampleVolumeInput`/`sampleCountInput`/
+      `picogreenReadoutEl`) and the fixed `updatePicogreenReadout()` are
+      gone, replaced by `renderRunParams(fields)` (builds `<label><input>`
+      pairs and computed `<span class="readout">`s from whatever the
+      server's `"run_params"` message declares) plus a `runParamInputs`
+      map the Start-button handler, `lockForRun()`, and the `"reset"`
+      handler all read/disable generically instead of naming specific
+      input ids.
+- [x] **`picogreen_demo.py` is the one demo that opts in**, declaring its
+      existing 2 inputs + 1 computed readout from its own
+      `MIN_SAMPLE_VOLUME_UL`/`MAX_SAMPLE_VOLUME_UL`/etc constants -- these
+      already existed and were previously "kept in sync by hand" with
+      separately hardcoded `index.html` attributes (per that comment's own
+      wording); now the JS-visible min/max/default/total all come directly
+      from the same Python constants the protocol logic itself uses, so
+      there's nothing left to keep in sync. Declared fresh at the top of
+      every `while True:` loop pass, since `reset_for_new_run()` clears the
+      server's fields the same way it clears the scene.
+
+      Verified live: `picogreen_demo.py`'s HUD renders identically to
+      before ("Sample 5µL × 24 PicoGreen 195µL"), the computed readout
+      still updates live as the sample-volume input changes (tested typing
+      10 -> readout updated to "PicoGreen 190µL"), and clicking Start with
+      that value produced `Started: 24 sample(s) at 10.0uL each (190.0uL
+      PicoGreen per well)` in the backend log with no errors -- confirming
+      the generically-built params dict round-trips correctly.
+      `cherry_pick_demo.py` (never calls `set_run_params()`) now shows no
+      HUD row at all -- just the status pill and buttons -- and still runs
+      end to end with an empty params dict and no errors.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

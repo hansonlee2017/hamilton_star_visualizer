@@ -29,7 +29,12 @@
     #reset-btn.visible { display: inline-block; }
     #speed-select { pointer-events: auto; margin-left: 8px; background: rgba(20,22,26,0.85); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 6px; padding: 6px 8px; font-size: 13px; cursor: pointer; }
 
-    #run-params { pointer-events: auto; display: inline-flex; align-items: center; gap: 8px; margin-left: 8px; background: rgba(20,22,26,0.85); border: 1px solid #3a3f47; border-radius: 6px; padding: 4px 10px; font-size: 12px; color: #b7bcc4; }
+    /* Hidden by default -- a protocol script opts in by calling
+       server.set_run_params([...]) (see main.js's renderRunParams()); most
+       demos never do, and the row should simply not exist for them rather
+       than show inputs they don't read. */
+    #run-params { pointer-events: auto; display: none; align-items: center; gap: 8px; margin-left: 8px; background: rgba(20,22,26,0.85); border: 1px solid #3a3f47; border-radius: 6px; padding: 4px 10px; font-size: 12px; color: #b7bcc4; }
+    #run-params.visible { display: inline-flex; }
     #run-params label { display: inline-flex; align-items: center; gap: 4px; }
     #run-params input[type="number"] { width: 46px; background: rgba(0,0,0,0.35); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 4px; padding: 3px 4px; font-size: 12px; }
     #run-params input[type="number"]:disabled { opacity: 0.6; }
@@ -60,16 +65,11 @@
 
   <div id="hud">
     <div id="status" class="disconnected"><span class="dot"></span><span id="status-text">connecting...</span></div>
-    <div id="run-params">
-      <label title="uL of sample mixed into each assay well (1-20)">Sample
-        <input id="sample-volume-input" type="number" min="1" max="20" step="1" value="5" />
-        &micro;L
-      </label>
-      <label title="How many samples to run, placed column-wise on the sample plate starting at A1 (1-88)">&times;
-        <input id="sample-count-input" type="number" min="1" max="88" step="1" value="24" />
-      </label>
-      <span id="picogreen-readout" class="readout" title="PicoGreen working solution per well: 200uL total - sample volume"></span>
-    </div>
+    <!-- Populated dynamically by main.js's renderRunParams() from the
+         server's "run_params" message -- empty (and hidden, see the
+         #run-params CSS above) unless the running protocol script called
+         server.set_run_params([...]). -->
+    <div id="run-params"></div>
     <button id="start-btn" disabled title="Tell the waiting protocol script to begin">&#9654; Start Protocol</button>
     <button id="reset-btn" disabled title="Start the whole protocol over with new parameters (only once the current run has finished)">&#8635; Reset</button>
     <button id="replay-btn" disabled title="Re-run everything this server has recorded so far, from the start">&#8635; Replay</button>
