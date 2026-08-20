@@ -1526,6 +1526,53 @@ aspiration from their tubes, and the serial dilution phases.
       from moving/duplicating the height computations or reworking the
       wait's derivation.
 
+## Review round 24 (2026-08-19)
+
+User report: during the serial dilution phase, only the active pipette
+(channel 0) appears to move -- channels 1-7, which should be dragged
+along, look frozen.
+
+- [x] **Root-caused: round 23's height reduction broke drag-along's
+      exact-duration invariant.** `nudgeChannel()` (the idle/dragged-along
+      channel path) already carried an explicit, load-bearing comment and
+      a "confirmed live" note from when drag-along was first built: every
+      channel in one gantry pass -- active or idle -- has to take the
+      *exact* same total duration, because each channel's queue is
+      independent FIFO, and a channel that finishes early starts its
+      *next* pass's legs while a slower one is still mid-leg, breaking the
+      whole arm's visible sync. Round 23 shortened the *active* channel's
+      rise/retract duration when a traverse-height override applied, but
+      `nudgeChannel()` still always used the old fixed `RISE_MS`/
+      `RETRACT_MS` -- exactly the violation that comment warned against,
+      just in the opposite direction from the bug it was originally
+      written to prevent (now the *active* channel races ahead of the
+      *idle* ones, instead of the reverse). Over many fast, tightly-looped
+      serial-dilution steps (each now much shorter thanks to round 23),
+      channels 1-7 fell further and further behind every iteration,
+      reading as "frozen" relative to channel 0's now much faster cycle.
+- [x] **Fixed by sharing one duration across the whole pass.** Extracted
+      `traverseLegZ()`/`traverseLegDuration()` as standalone functions
+      (previously private closures inside `animateChannelOp()`) so
+      `animateChannelGroupOp()` can compute a pass's rise/retract duration
+      *once*, from one representative active entry, and hand the identical
+      value to both `animateChannelOp()` (every active channel in the
+      pass) and `nudgeChannel()` (every idle one) -- guaranteeing bit-for-
+      bit equal totals regardless of height overrides, restoring the
+      invariant instead of just patching the one symptom. `nudgeChannel()`
+      also now converts `traverseHeightMm`/`endHeightMm` to a body-origin
+      Z using its *own* channel's tip length (matching
+      `animateChannelOp()`'s round-23 fix), in case an idle channel is
+      ever carrying a different tip model than the pass's active one --
+      not currently possible in this demo, but the math doesn't assume it.
+
+      Verified live: polled all 8 channels' rendered Z every 100ms across
+      a full run and found 245 of 248 samples where channel 0 was away
+      from `restZ` (i.e. doing real work) also showed channels 1-7 at the
+      *identical* Z, moving in exact lockstep -- not frozen at `restZ`
+      (the pre-fix symptom). Full run still finished with every volume
+      exactly correct, confirming the shared-duration refactor didn't
+      change anything about the actual pipetting.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
