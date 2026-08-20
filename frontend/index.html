@@ -14,13 +14,18 @@
     #status .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; }
     #status.connected .dot { background: #35c46a; }
     #status.disconnected .dot { background: #d9534f; }
-    #replay-btn, #start-btn, #reset-btn { pointer-events: auto; margin-left: 8px; background: rgba(20,22,26,0.85); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
-    #replay-btn:hover:not(:disabled), #start-btn:hover:not(:disabled), #reset-btn:hover:not(:disabled) { background: rgba(40,44,50,0.9); }
+    #replay-btn, #start-btn, #reset-btn { pointer-events: auto; margin-left: 8px; color: #e8eaed; border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; }
     #replay-btn:disabled, #start-btn:disabled, #reset-btn:disabled { opacity: 0.5; cursor: default; }
-    #start-btn { background: #2ea364; border-color: #2ea364; color: #0c1a12; font-weight: 600; }
+    #start-btn { background: #2ea364; border: 1px solid #2ea364; color: #0c1a12; font-weight: 600; }
     #start-btn:hover:not(:disabled) { background: #35bd73; }
     #start-btn.started { display: none; }
-    #reset-btn { display: none; }
+    /* Replay (blue) and Reset (amber) get distinct tinted backgrounds so
+       they're easy to tell apart at a glance, not just by their labels --
+       neither is styled as a plain neutral button like #speed-select. */
+    #replay-btn { background: rgba(47,91,130,0.35); border: 1px solid #3f6f9e; }
+    #replay-btn:hover:not(:disabled) { background: rgba(47,91,130,0.55); }
+    #reset-btn { background: rgba(168,90,30,0.35); border: 1px solid #a86a2e; display: none; }
+    #reset-btn:hover:not(:disabled) { background: rgba(168,90,30,0.55); }
     #reset-btn.visible { display: inline-block; }
     #speed-select { pointer-events: auto; margin-left: 8px; background: rgba(20,22,26,0.85); color: #e8eaed; border: 1px solid #3a3f47; border-radius: 6px; padding: 6px 8px; font-size: 13px; cursor: pointer; }
 

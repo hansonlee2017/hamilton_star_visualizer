@@ -1282,6 +1282,47 @@ the whole thing over with new values.
       the hand-derived expectation. No 1000uL tip, malformed volume, or
       backend error appeared in either run.
 
+## Review round 20 (2026-08-19)
+
+Three smaller fixes: always leave a known 1000uL of PicoGreen behind
+instead of an unpredictable amount; lock Replay during a run the same way
+Reset is locked; and make Replay/Reset visually distinct colors so they
+aren't confused for each other.
+
+- [x] **Fixed 1000uL PicoGreen residual.** The reservoir's starting fill
+      was `(needed for this run) + 500uL margin` -- a guess at the
+      *starting* amount, not a promise about what's left afterward.
+      Renamed to `RESIDUAL_PICOGREEN_UL = 1000.0` and reworded the math the
+      same way: `required = (sample_count + 8) * picogreen_volume +
+      RESIDUAL_PICOGREEN_UL`, so whatever a given run actually consumes,
+      exactly 1000uL remains once it's done -- a guaranteed residual, not
+      a starting-fill margin that happened to leave some amount over.
+- [x] **Replay locked during a run, server-side and in the HUD.** Replaying
+      over a live run would interleave replayed events with live ones on
+      *every* connected client, not just the one that clicked -- the same
+      class of problem "Reset locked during execution" already exists to
+      prevent. Guarded the "replay" websocket action the same way "reset"
+      already is (`not self._start_event.is_set() or self._finished_event.
+      is_set()` -- allowed before a run starts and again once it's
+      finished, never mid-run), and disabled the HUD button in the same two
+      places Reset's lock lives: optimistically on Start, authoritatively
+      on every connected client's "start_status", re-enabled on
+      "run_status: finished" alongside Reset.
+- [x] **Replay (blue) and Reset (amber) get distinct tinted backgrounds.**
+      Previously both were the same flat neutral-dark button style as
+      everything else in the HUD, only distinguishable by their labels.
+
+      Verified live: sent a raw `{"action": "replay"}` over a second
+      websocket connection while a run was in progress and confirmed it
+      was silently ignored -- that connection received exactly the same
+      555 sync messages a connection making *no* replay request also
+      received, proving the server actually rejected it rather than the
+      UI just hiding the button. After the run finished, the reservoir's
+      `resourceIndex` volume read exactly 1000uL, and both Replay and
+      Reset showed as enabled with their own distinct colors (confirmed
+      by screenshot) rather than the flat gray every other HUD control
+      uses.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

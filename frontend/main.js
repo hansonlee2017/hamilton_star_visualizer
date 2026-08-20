@@ -179,14 +179,18 @@ replayBtn.addEventListener("click", () => {
   logEvent("replay", "requested from server");
 });
 
-// Locks the two run-parameter inputs -- called both optimistically (this
-// tab clicked Start) and authoritatively (the server's "start_status"
-// broadcast, which every connected tab receives -- see the websocket
-// handler below) so a *second* browser tab that never clicked Start still
-// can't edit params for a run already underway.
-function lockRunParams() {
+// Locks the two run-parameter inputs and Replay -- called both
+// optimistically (this tab clicked Start) and authoritatively (the
+// server's "start_status" broadcast, which every connected tab receives --
+// see the websocket handler below) so a *second* browser tab that never
+// clicked Start still can't edit params, or replay over a live run, for a
+// run already underway. Replay's lock lifts again once "run_status" says
+// the run finished (see that handler below) -- unlike the params, which
+// stay locked until a Reset actually starts a new run.
+function lockForRun() {
   sampleVolumeInput.disabled = true;
   sampleCountInput.disabled = true;
+  replayBtn.disabled = true;
 }
 
 startBtn.addEventListener("click", () => {
@@ -206,7 +210,7 @@ startBtn.addEventListener("click", () => {
   // this one) will confirm it a moment later regardless.
   startBtn.disabled = true;
   startBtn.classList.add("started");
-  lockRunParams();
+  lockForRun();
   logEvent("start", `protocol started (${params.sample_count} samples, ${params.sample_volume_ul}uL each)`);
 });
 
@@ -1345,13 +1349,16 @@ function connect() {
       startBtn.disabled = msg.started;
       startBtn.classList.toggle("started", msg.started);
       if (msg.started) {
-        lockRunParams();
+        lockForRun();
         logEvent("start", "protocol started");
       }
     } else if (msg.type === "run_status") {
       resetBtn.disabled = !msg.finished;
       resetBtn.classList.toggle("visible", msg.finished);
-      if (msg.finished) logEvent("run_status", "finished -- reset available");
+      if (msg.finished) {
+        replayBtn.disabled = false;
+        logEvent("run_status", "finished -- reset/replay available");
+      }
     } else if (msg.type === "reset") {
       // The protocol script rewound to wait for a new "Start Protocol" --
       // put the whole HUD back to its pre-run state. The next "scene"
@@ -1363,6 +1370,7 @@ function connect() {
       startBtn.classList.remove("started");
       resetBtn.disabled = true;
       resetBtn.classList.remove("visible");
+      replayBtn.disabled = false;
       logListEl.innerHTML = "";
       logEvent("reset", "ready for a new run");
     }

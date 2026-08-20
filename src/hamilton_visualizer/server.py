@@ -145,7 +145,13 @@ class VisualizerServer:
           except ValueError:
             continue
           action = msg.get("action")
-          if action == "replay":
+          # Guarded the same way "reset" is (not just by the browser
+          # graying the button out): replaying over a run still in
+          # progress would interleave replayed events with live ones on
+          # every connected client, not just the one that clicked --
+          # allowed before a run starts (nothing to conflict with yet) and
+          # again once it's finished, same window "reset" opens in.
+          if action == "replay" and (not self._start_event.is_set() or self._finished_event.is_set()):
             await self.replay(websocket)
           elif action == "start_protocol" and not self._start_event.is_set():
             params = msg.get("params")

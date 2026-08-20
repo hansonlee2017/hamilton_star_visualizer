@@ -314,10 +314,14 @@ async def main() -> None:
 
     # Enough PicoGreen for every sample/standard well this run actually
     # uses (picogreen_volume uL x each of sample_count sample wells + the
-    # 8 standard wells), plus a small margin -- not a flat guess, and
-    # capped at the trough's real 60mL capacity even though the true
+    # 8 standard wells), plus a fixed 1000uL left over at the end -- not a
+    # flat guess at the *starting* fill, a guaranteed *residual*, so there's
+    # always a known amount of working solution still in the reservoir once
+    # the run finishes, regardless of how much a given run actually used.
+    # Capped at the trough's real 60mL capacity even though the true
     # maximum (88 samples, 199uL/well) comes nowhere close to it.
-    required_picogreen = (sample_count + len(ROWS)) * picogreen_volume + 500.0
+    RESIDUAL_PICOGREEN_UL = 1000.0
+    required_picogreen = (sample_count + len(ROWS)) * picogreen_volume + RESIDUAL_PICOGREEN_UL
     res.picogreen_reservoir.tracker.set_volume(min(required_picogreen, 60_000.0))
 
     await backend.broadcast_state()
