@@ -84,6 +84,20 @@ planning code in this file at all; see ``frontend/main.js``'s
 ``planGantryPasses()`` for how the visualizer works out real motion
 (including which channels are dragged along versus idle) on its own.
 
+Deliberately no ``asyncio.sleep()`` calls anywhere in this script, even
+between stages. The browser's own animation queue is entirely decoupled
+from how fast these calls actually run -- each channel's queue plays out
+its own real (~1.6s/leg, less with the traverse-height overrides above)
+pace regardless of how quickly the backend sends the events that filled
+it (see docs/PLAN.md's "Review round 16" for the drag-along/staleness
+work an earlier version of this file needed *because* of that gap, and
+"Review round 25" for why the sleeps themselves were never load-bearing
+for anything the browser shows). The one real tradeoff: ``replay()``
+paces itself off the *original* gaps between when events were sent
+(``VisualizerServer.replay()``'s ``MAX_REPLAY_GAP``) -- with nothing
+pacing those sends anymore, a replay of this run plays back in a few
+seconds rather than at anything resembling the original pace.
+
 Run it with:
 
     uv run python examples/picogreen_demo.py
@@ -390,7 +404,6 @@ async def main() -> None:
     # 1-7 together for the diluent distribution) rather than picking up
     # per-step.
     await lh.pick_up_tips(fresh_tip_spots(tier_for_volume(DILUTION_VOLUME), ROWS))
-    await asyncio.sleep(0.3)
 
     # Diluent into every well but the top standard, including the blank
     # (H12) -- channels 1-7 each independently visit the tiny diluent tube
@@ -412,7 +425,6 @@ async def main() -> None:
       minimum_traverse_height_at_beginning_of_a_command=sample_plate_traverse_height,
       min_z_endpos=sample_plate_traverse_height,
     )
-    await asyncio.sleep(0.3)
 
     # Top standard: the neat 100 ng/uL stock, no dilution -- channel 0. *2x*
     # the other wells' volume, since the very next step pulls DILUTION_VOLUME
@@ -433,7 +445,6 @@ async def main() -> None:
       minimum_traverse_height_at_beginning_of_a_command=sample_plate_traverse_height,
       min_z_endpos=sample_plate_traverse_height,
     )
-    await asyncio.sleep(0.3)
 
     # Serial 2-fold dilution across A12-G12 -- channel 0 alone, continuing
     # with the same tip it started with (descending concentration the whole
@@ -456,44 +467,8 @@ async def main() -> None:
         minimum_traverse_height_at_beginning_of_a_command=sample_plate_traverse_height,
         min_z_endpos=sample_plate_traverse_height,
       )
-      await asyncio.sleep(0.2)
 
     await lh.discard_tips()
-    # A real Hamilton's 8 channels share one arm (see frontend/main.js's
-    # planGantryPasses() docstring): even with channels 1-7 dragged along
-    # for realism during the steps above, the *whole arm* was still tied up
-    # the entire time -- dragging a channel along still takes as long as
-    # doing real work, it just isn't idle-and-ignored the way an earlier
-    # version of this demo left it. So this wait is still the real time
-    # nothing else could start, not a workaround: every channel ends this
-    # stage with exactly 24 legs of animation (pick-up, 7 diluent-
-    # distribution stops -- one real aspirate each, dragged along for the
-    # other 6 -- the shared dispense, top-standard aspirate+dispense, 6
-    # serial aspirate/dispense pairs, discard), each a full rise+x+y+
-    # descend+hold+retract cycle. Only pick_up_tips/discard_tips (2 of the
-    # 24) still rise/retract to the full global safe height (~1.6s/leg);
-    # the other 22 all pass the traverse-height overrides above, so their
-    # rise/retract legs are shorter -- ~1.1s/leg is an estimate (X/Y/
-    # descend/hold are unaffected; only rise+retract shrink, by a fraction
-    # that depends on each resource's own top height, verified live this
-    # round -- see docs/PLAN.md's "Review round 23"). Still an estimate,
-    # not a computed guarantee (this wait can't read the
-    # frontend's actual per-op fraction), so it keeps the same proportional
-    # safety margin round 9's cherry-pick demo found necessary, just
-    # applied to a smaller, more accurate base instead of scaling up a
-    # uniform 1.6s/leg across every leg regardless of whether it actually
-    # still takes that long.
-    dilution_stage_legs_full_height = 2  # pick_up_tips, discard_tips
-    dilution_stage_legs_reduced_height = 22
-    seconds_per_leg_full_height = 1.6
-    seconds_per_leg_reduced_height = 1.1
-    await asyncio.sleep(
-      (
-        dilution_stage_legs_full_height * seconds_per_leg_full_height
-        + dilution_stage_legs_reduced_height * seconds_per_leg_reduced_height
-      )
-      * 1.3
-    )
 
     # -- add PicoGreen working solution, then samples/standards ---------------
     # Added *before* the smaller-volume sample/standard transfer below --
@@ -530,7 +505,6 @@ async def main() -> None:
         minimum_traverse_height_at_beginning_of_a_command=assay_plate_traverse_height,
         min_z_endpos=assay_plate_traverse_height,
       )
-      await asyncio.sleep(0.3)
     await lh.discard_tips()
 
     # Samples/standards *do* need a fresh tip per column -- each one is a
@@ -556,7 +530,6 @@ async def main() -> None:
         min_z_endpos=assay_plate_traverse_height,
       )
       await lh.discard_tips()
-      await asyncio.sleep(0.3)
 
     print("PicoGreen assay setup finished.")
     await server.mark_finished()

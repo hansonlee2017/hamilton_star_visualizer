@@ -1573,6 +1573,55 @@ along, look frozen.
       exactly correct, confirming the shared-duration refactor didn't
       change anything about the actual pipetting.
 
+## Review round 25 (2026-08-19)
+
+User question: does the visualizer actually need to animate close to real
+time, and could `picogreen_demo.py` skip `asyncio.sleep()`/wait entirely by
+generating Chatterbox text and parsing it for animation instead? Followed
+by: just remove the `asyncio.sleep()` calls.
+
+- [x] **Assessed the "parse Chatterbox text" idea and didn't take it.**
+      This was already considered and rejected when the project was
+      designed -- `visualizer_backend.py`'s own docstring explains why:
+      `VisualizerBackend` wraps the `LiquidHandlerBackend` interface to
+      intercept the same typed PyLabRobot objects PLR itself uses
+      internally (exact resource objects, real float volumes, real tip
+      geometry), rather than re-deriving them from text meant for human
+      eyeballs. Concretely confirmed why text-parsing would be worse, not
+      simpler: `chatterbox.py` truncates its own printed kwarg columns to
+      15 characters (`minimum_traverse_height_at_beginning_of_a_command`
+      prints as `ng_of_a_command`) and resource names to 20-30 characters
+      -- a parser would lose exactly the data round 23's traverse-height
+      feature depends on, and would need its own separate copy of the deck
+      resource tree to resolve names back into anything with real Z
+      geometry anyway, which is what `VisualizerBackend` already does more
+      directly.
+- [x] **Removed every `asyncio.sleep()` call from `picogreen_demo.py`.**
+      Confirmed first that none of them were ever load-bearing for
+      anything the browser shows: each channel's animation queue is
+      already fully decoupled from backend timing (independent per-channel
+      FIFO, built specifically around "events arrive faster than they
+      animate" -- see round 16's drag-along/staleness work). Removing the
+      per-stage `0.2`/`0.3`s pacing sleeps and the whole dilution-stage
+      wait (with its now-obsolete leg-counting rationale comment) doesn't
+      change anything about tip/volume correctness, which was always
+      enforced by PLR's own `await`ed call ordering, never by elapsed
+      real time. The one real cost, noted in the module docstring:
+      `VisualizerServer.replay()` paces itself off the *original* gaps
+      between when events were sent, so a replay of a run recorded without
+      any pacing plays back in a few seconds rather than at anything
+      resembling the original pace -- an accepted, explicit tradeoff, not
+      an oversight.
+
+      Verified live: a full run finished (no errors) essentially
+      instantly on the backend side, and once the browser's animation
+      queue -- now carrying its entire backlog at once rather than
+      trickling in between paced sends -- caught up, every volume was
+      still exactly correct (32 assay wells at 200uL, standard curve at
+      95/95/95/95/95/95/195/95uL, reservoir at the designed 1000uL
+      residual), confirming the sleeps were cosmetic pacing only, never a
+      correctness dependency.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
