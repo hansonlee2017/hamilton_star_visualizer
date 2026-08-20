@@ -1622,6 +1622,51 @@ by: just remove the `asyncio.sleep()` calls.
       residual), confirming the sleeps were cosmetic pacing only, never a
       correctness dependency.
 
+## Review round 26 (2026-08-19)
+
+User report: channels still not synchronized during pipetting steps, even
+after round 24's fix. Suggestion: stop scaling rise/retract *duration* to
+match the traverse-height reduction -- keep the Z-target change, drop the
+timing change, since a real Hamilton's channels move at a fixed speed
+regardless of distance anyway. Also asked whether `asyncio.gather()`
+could sync the animations from the Python side instead.
+
+- [x] **Answered the `asyncio.gather()` question.** No -- the desync is
+      entirely a browser-side concern. The frontend builds its own
+      animation timeline from the stream of "op" events; it has no
+      visibility into how the Python script sequenced its own `await`
+      calls, so concurrency on the backend can't influence it either way.
+      (It also wouldn't be semantically right for the diluent-distribution
+      loop specifically, which is deliberately sequential -- only one
+      channel fits the tube's ~10mm opening at a time.)
+- [x] **Took the suggested simplification -- and it's also the fix.**
+      Round 24's "shared duration per pass" approach reduced but didn't
+      eliminate the risk: separate op calls that each compute their own
+      duration from their own representative entry (e.g. the diluent-
+      distribution loop's 7 separate single-channel aspirate calls, each
+      against a tube whose liquid level -- and so `entry.z` -- drifts
+      slightly lower as it drains) could still land on slightly different
+      numbers. Removed rise/retract duration-scaling entirely --
+      `traverseLegDuration()`, `MIN_LEG_MS`, and the "representative
+      active entry" duration-sharing in `animateChannelGroupOp()` are all
+      gone. Every leg, active or idle, always takes its fixed nominal
+      `RISE_MS`/`RETRACT_MS` now, exactly as before round 23 -- only the Z
+      *target* still reflects a traverse-height override (`traverseLegZ()`,
+      unchanged, still the round-23 body-origin-frame fix). A real
+      Hamilton's channels don't move faster over a shorter distance
+      anyway, so this wasn't even sacrificing realism -- just an animation
+      embellishment that turned out to be the actual source of the
+      remaining desync. With duration always a fixed constant, there's no
+      computation left that could ever disagree between channels.
+
+      Verified live: polled all 8 channels' rendered Z every 100ms across
+      a full run -- zero samples where an idle channel stayed frozen at
+      `restZ` while another channel was doing real work (the reported
+      symptom), and the whole Z trace stayed within sane bounds (never
+      below a real working depth, never above `restZ`) confirming the
+      round-23 piercing/clipping fix is still intact. Full run still
+      finished with every volume exactly correct.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

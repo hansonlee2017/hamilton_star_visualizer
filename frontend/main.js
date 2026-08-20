@@ -1017,12 +1017,6 @@ const RETRACT_MS = 350;
 let durationScale = 1;
 const scaled = (ms) => ms * durationScale;
 
-// Shortest sensible rise/retract leg once a custom traverse/end height
-// pushes its nominal duration toward zero (see animateChannelOp's
-// riseMs/retractMs) -- keeps a genuinely tiny move visibly a *move*,
-// never a same-frame teleport, however aggressive the height override.
-const MIN_LEG_MS = 40;
-
 // traverseHeightMm/endHeightMm (see events.py's channel_ops_event()
 // docstring) are expressed in *tip-point* terms -- how high the tip's own
 // point should clear a resource by -- not the *body-origin* Z every leg
@@ -1036,36 +1030,29 @@ const MIN_LEG_MS = 40;
 // where it should move *down*) and, during the X/Y travel at that wrong
 // height, puts the tip's own rendered point below the resource's rim it
 // was supposed to be clearing -- exactly the "pierce through the well"/
-// "clip through the reservoir" look. `refZ`/`tipLengthFn` (not a bare
-// number) so this can be shared between animateChannelOp() (an active
-// channel, whose refZ is its own entry.z) and animateChannelGroupOp()'s
-// per-pass duration (computed once from a *representative* active entry,
-// then handed to nudgeChannel() too -- see that function's own comment for
-// why every channel in one pass, active or idle, must land on the exact
-// same total duration). `tipLengthFn` is a function, not a value, for the
-// same staleness reason `targetZ()` below is one: `ch.tipLength` can't
-// safely be read before the leg actually starts (see enqueue()'s
-// docstring).
+// "clip through the reservoir" look. `tipLengthFn` is a function, not a
+// value, for the same staleness reason `targetZ()` below is one:
+// `ch.tipLength` can't safely be read before the leg actually starts (see
+// enqueue()'s docstring).
+//
+// Deliberately *only* the Z target, not the duration: round 23 also scaled
+// RISE_MS/RETRACT_MS down to match, and round 24 tried sharing that scaled
+// duration across a whole gantry pass so active and idle channels landed
+// on the same total -- but different passes (e.g. the diluent-distribution
+// loop's 7 separate single-channel aspirate calls, each computing its own
+// duration from its own entry.z, which drifts slightly as the tube drains)
+// could still disagree slightly, and a real Hamilton's channels move at a
+// fixed physical speed regardless of how far a given leg travels anyway --
+// scaling duration was never realistic, just an animation embellishment
+// that turned out to be the actual source of the desync. Every leg now
+// always takes its fixed nominal duration (see docs/PLAN.md's "Review
+// round 26") -- simpler, and there's no computation left that could ever
+// disagree between channels.
 function traverseLegZ(tipHeightMm, refZ, tipLengthFn) {
   if (tipHeightMm == null) return restZ;
   return () => {
     const tipLength = tipLengthFn();
     return Math.min(restZ, Math.max(refZ + tipLength, tipHeightMm + tipLength));
-  };
-}
-
-// Duration proportional to how much of the *nominal* body-origin span
-// (refZ -> restZ) this leg's resolved height actually covers -- 1.0 (the
-// unchanged RISE_MS/RETRACT_MS) whenever no override applies, since the
-// resolved height then just equals restZ.
-function traverseLegDuration(tipHeightMm, nominalMs, refZ, tipLengthFn) {
-  if (tipHeightMm == null) return scaled(nominalMs);
-  return () => {
-    const tipLength = tipLengthFn();
-    const floor = refZ + tipLength;
-    const span = Math.max(1, restZ - floor);
-    const bodyZ = Math.min(restZ, Math.max(floor, tipHeightMm + tipLength));
-    return Math.max(MIN_LEG_MS, scaled(nominalMs) * ((bodyZ - floor) / span));
   };
 }
 
@@ -1075,16 +1062,7 @@ function traverseLegDuration(tipHeightMm, nominalMs, refZ, tipLengthFn) {
 // see events.py's tip_length_mm comment. Every other op omits it and falls
 // back to the channel's own remembered `tipLength` (set by its last
 // pick-up), since it's still carrying that same tip throughout.
-//
-// `riseDuration`/`retractDuration`: normally supplied by
-// animateChannelGroupOp() -- shared across this whole gantry pass, active
-// and idle channels alike (see traverseLegDuration()'s docstring) -- and
-// only computed locally here as a fallback for a direct caller that
-// doesn't go through that path.
-function animateChannelOp(
-  entry,
-  { onArrive, tipLength, traverseHeightMm, endHeightMm, riseDuration, retractDuration } = {}
-) {
+function animateChannelOp(entry, { onArrive, tipLength, traverseHeightMm, endHeightMm } = {}) {
   const ch = channels[entry.channel];
   if (!ch) return;
   // `entry.z` (from the server) is where the *tip's point* should end up --
@@ -1100,8 +1078,6 @@ function animateChannelOp(
 
   const riseZ = traverseLegZ(traverseHeightMm, entry.z, tipLengthFn);
   const retractZ = traverseLegZ(endHeightMm, entry.z, tipLengthFn);
-  const rise = riseDuration ?? traverseLegDuration(traverseHeightMm, RISE_MS, entry.z, tipLengthFn);
-  const retract = retractDuration ?? traverseLegDuration(endHeightMm, RETRACT_MS, entry.z, tipLengthFn);
 
   // x/y: null means "stay wherever this leg actually starts" -- see
   // enqueue()'s docstring for why that can't just be ch.pos.x/y here.
@@ -1111,14 +1087,14 @@ function animateChannelOp(
   // planGantryPasses() below for the same "x is shared, y is per-channel"
   // fact applied *across* channels, not just within one channel's own
   // approach.
-  ch.enqueue({ x: null, y: null, z: riseZ }, rise);
+  ch.enqueue({ x: null, y: null, z: riseZ }, scaled(RISE_MS));
   ch.enqueue({ x: entry.x, y: null, z: riseZ }, scaled(X_MOVE_MS));
   ch.enqueue({ x: entry.x, y: entry.y, z: riseZ }, scaled(Y_MOVE_MS));
   // onArrive fires exactly when this leg's tween completes -- see enqueue()'s
   // docstring for why that's not the same as a fixed setTimeout delay.
   ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(DESCEND_MS), onArrive);
   ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(HOLD_MS));
-  ch.enqueue({ x: entry.x, y: entry.y, z: retractZ }, retract);
+  ch.enqueue({ x: entry.x, y: entry.y, z: retractZ }, scaled(RETRACT_MS));
 }
 
 // Hamilton STAR's standard channel spacing -- also the minimum center-to-
@@ -1299,39 +1275,29 @@ function planGantryPasses(entries) {
 // (Confirmed live: recording all 8 channels' position and classifying
 // which axis was moving showed exactly this -- one channel already
 // descending while another, from the *next* pass, was already moving in
-// y -- until this padding was added.)
+// y -- until this padding was added.) Every leg here uses the fixed
+// nominal duration (RISE_MS/etc, never scaled down for a traverse-height
+// override -- see animateChannelOp()'s docstring for why), so this always
+// matches an active channel's own total exactly, with no computation that
+// could ever disagree between channels.
 //
-// `riseDuration`/`retractDuration` (usually shared from
-// animateChannelGroupOp(), same as the active channel(s) in this pass are
-// using -- see traverseLegDuration()'s docstring): without them, this
-// still defaults to the old fixed RISE_MS/RETRACT_MS, but once an active
-// channel in the same pass has a shorter, traverse-height-reduced
-// duration, this padding leg has to shrink by exactly that much too, or
-// the *same* desync this whole function exists to prevent comes right
-// back -- just this channel racing to finish a still-full-length nudge
-// while the active one has already moved on (confirmed live -- see
-// docs/PLAN.md's "Review round 24"). `traverseHeightMm`/`endHeightMm`
-// (this channel's own, since it may be carrying a different tip than the
-// pass's active channel -- unlikely in any protocol this demo runs today,
-// but the Z math doesn't assume it) adjust where it travels to match, the
-// same reasoning as animateChannelOp()'s riseZ/retractZ; unlike that
-// function, there's no "this op's own working depth" floor to clamp
-// against here (an idle channel isn't descending anywhere this pass), so
-// it only ever clamps against the restZ ceiling.
-function nudgeChannel(channelIndex, x, y, { traverseHeightMm, endHeightMm, riseDuration, retractDuration } = {}) {
+// `traverseHeightMm`/`endHeightMm` (this channel's own, since it may be
+// carrying a different tip than the pass's active channel -- unlikely in
+// any protocol this demo runs today, but the Z math doesn't assume it)
+// still adjust *where* it travels, same reasoning as animateChannelOp()'s
+// riseZ/retractZ; unlike that function, there's no "this op's own working
+// depth" floor to clamp against here (an idle channel isn't descending
+// anywhere this pass), so it only ever clamps against the restZ ceiling.
+function nudgeChannel(channelIndex, x, y, { traverseHeightMm, endHeightMm } = {}) {
   const ch = channels[channelIndex];
   if (!ch) return;
   const riseZ = traverseHeightMm != null ? () => Math.min(restZ, traverseHeightMm + ch.tipLength) : restZ;
   const retractZ = endHeightMm != null ? () => Math.min(restZ, endHeightMm + ch.tipLength) : restZ;
-  const rise = riseDuration ?? scaled(RISE_MS);
-  const retract = retractDuration ?? scaled(RETRACT_MS);
 
-  ch.enqueue({ x: null, y: null, z: riseZ }, rise);
+  ch.enqueue({ x: null, y: null, z: riseZ }, scaled(RISE_MS));
   ch.enqueue({ x, y: null, z: riseZ }, scaled(X_MOVE_MS));
   ch.enqueue({ x, y, z: riseZ }, scaled(Y_MOVE_MS));
-  ch.enqueue({ x, y, z: retractZ }, (from, target) =>
-    scaled(DESCEND_MS + HOLD_MS) + (typeof retract === "function" ? retract(from, target) : retract)
-  );
+  ch.enqueue({ x, y, z: retractZ }, scaled(DESCEND_MS + HOLD_MS + RETRACT_MS));
 }
 
 function flashResource(resourceName) {
@@ -1348,26 +1314,8 @@ function flashResource(resourceName) {
 // `makeOnArrive(entry)` builds that per-entry callback.
 function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor, traverseHeightMm, endHeightMm } = {}) {
   for (const pass of planGantryPasses(entries)) {
-    // Computed once per pass, from *one* representative active entry, and
-    // shared by every channel in the pass -- active and idle alike (see
-    // nudgeChannel()'s comment for why they must match exactly). Every
-    // protocol this demo runs today has every active entry in one pass
-    // targeting the same resource at the same depth with the same tip
-    // regardless, so "representative" and "exact" coincide in practice,
-    // not just approximately.
-    const refEntry = pass.active[0];
-    const refTipLengthFn = refEntry
-      ? () => (tipLengthFor ? tipLengthFor(refEntry) : channels[refEntry.channel]?.tipLength)
-      : () => 0;
-    const riseDuration = refEntry
-      ? traverseLegDuration(traverseHeightMm, RISE_MS, refEntry.z, refTipLengthFn)
-      : scaled(RISE_MS);
-    const retractDuration = refEntry
-      ? traverseLegDuration(endHeightMm, RETRACT_MS, refEntry.z, refTipLengthFn)
-      : scaled(RETRACT_MS);
-
     for (const [ch, y] of pass.idleMoves) {
-      nudgeChannel(ch, pass.x, y, { traverseHeightMm, endHeightMm, riseDuration, retractDuration });
+      nudgeChannel(ch, pass.x, y, { traverseHeightMm, endHeightMm });
     }
     for (const entry of pass.active) {
       animateChannelOp(entry, {
@@ -1375,8 +1323,6 @@ function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor, traverseHe
         tipLength: tipLengthFor ? tipLengthFor(entry) : undefined,
         traverseHeightMm,
         endHeightMm,
-        riseDuration,
-        retractDuration,
       });
     }
   }

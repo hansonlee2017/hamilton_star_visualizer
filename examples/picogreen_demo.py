@@ -87,12 +87,14 @@ planning code in this file at all; see ``frontend/main.js``'s
 Deliberately no ``asyncio.sleep()`` calls anywhere in this script, even
 between stages. The browser's own animation queue is entirely decoupled
 from how fast these calls actually run -- each channel's queue plays out
-its own real (~1.6s/leg, less with the traverse-height overrides above)
-pace regardless of how quickly the backend sends the events that filled
-it (see docs/PLAN.md's "Review round 16" for the drag-along/staleness
-work an earlier version of this file needed *because* of that gap, and
-"Review round 25" for why the sleeps themselves were never load-bearing
-for anything the browser shows). The one real tradeoff: ``replay()``
+its own real ~1.6s/leg pace (the traverse-height overrides above change
+*where* a leg travels, not how long it takes -- see frontend/main.js's
+animateChannelOp() docstring) regardless of how quickly the backend sends
+the events that filled it (see docs/PLAN.md's "Review round 16" for the
+drag-along/staleness work an earlier version of this file needed *because*
+of that gap, and "Review round 25" for why the sleeps themselves were
+never load-bearing for anything the browser shows). The one real tradeoff:
+``replay()``
 paces itself off the *original* gaps between when events were sent
 (``VisualizerServer.replay()``'s ``MAX_REPLAY_GAP``) -- with nothing
 pacing those sends anymore, a replay of this run plays back in a few
