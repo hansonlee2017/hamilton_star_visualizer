@@ -1745,6 +1745,69 @@ demos, `cherry_pick_demo.py` and `demo_protocol.py`.
       landed at 110uL (150 - 40) and all 8 smiley-pattern wells at exactly
       40uL.
 
+## Review round 29 (2026-08-19)
+
+User request: a new demo drawing a simple picture on a 384-well square-well
+plate, 50uL tips, a 60mL reservoir.
+
+- [x] **`examples/pixel_art_demo.py`.** A 9x11 pixel-art heart bitmap
+      (`HEART_BITMAP`, hand-drawn but verified left-right symmetric and
+      64 cells filled -- exactly 8 batches of 8), centered on a 384-well
+      plate's 16x24 grid. Each batch is one ordinary 8-channel
+      `LiquidHandler` call -- aspirate from the one shared reservoir
+      (`spread="wide"`) and dispense into up to 8 scattered wells at once,
+      the same "let `planGantryPasses()` work out the real motion" idiom
+      `cherry_pick_demo.py` already established. One tip pick-up covers
+      the whole picture (same reuse reasoning as picogreen_demo.py's
+      PicoGreen stage: same reservoir, always-empty destinations). Built
+      from the start without `asyncio.sleep()`, matching round 25-28's now-
+      established practice.
+- [x] **Found and fixed a real bug in `events.py` while building it.**
+      PyLabRobot's `Container.material_z_thickness` is a *property*, not a
+      plain attribute -- for a resource that never had it set (several real
+      labware definitions, including the plate this demo first tried),
+      accessing it doesn't leave it merely absent, it actively raises
+      `NotImplementedError`. `liquid_surface_point()`'s
+      `getattr(resource, "material_z_thickness", None)` only rescues a
+      *missing* attribute (`AttributeError`); a property raising something
+      else propagates straight through regardless of the default given --
+      crashing the very first dispense against such a plate. Fixed with an
+      explicit `try/except (NotImplementedError, AttributeError)` instead.
+- [x] **Diagnosed a real frontend rendering gap, then sidestepped it with
+      real custom labware instead of patching around it.** The demo's
+      first plate choice, PyLabRobot's `HalfDeepWell_384_Well` (a
+      Tecan-specific class, the closest available catalog match at the
+      time), reports `category="tecan_plate"`, not the generic `"plate"`
+      `frontend/main.js`'s `THIN_CATEGORIES`/`CATEGORY_COLORS` look up --
+      so it fell through both the thin-base treatment and the purple
+      color, rendering as a solid full-height gray box burying its own
+      wells instead of the thin purple base every other plate gets. Per
+      user direction, fixed not by teaching the frontend about this one
+      more category, but by giving this demo a real, correctly-categorized
+      plate instead: `examples/custom_labware.py`'s
+      `cellvis_384_wellplate_120uL_Fb`, a plain `Plate` (category always
+      `"plate"`, regardless of brand) built the same way PyLabRobot's own
+      catalog entries are, with real dimensions -- footprint, well pitch,
+      square well size (3.3mm, derived exactly from the product's stated
+      10.89mm^2 bottom area), max volume (120uL), and cover-glass
+      thickness/offset -- taken from Cellvis's product page and cross-
+      checked against their own engineering drawing (every number that
+      appears in both sources agrees, including a non-obvious one: the
+      drawing's "11.38" well-depth callout is exactly what plate height -
+      glass offset - glass thickness computes to from the product page's
+      separately-stated numbers). This is a real, still-open gap for any
+      *other* plate PyLabRobot categorizes outside its own convention --
+      not fixed here, since a real custom part sidestepped it for this
+      demo specifically.
+
+      Verified live: the new plate's `category` reads `"plate"` and
+      renders with the expected thin purple base (`0x6a5a94`) and the
+      heart visibly legible in the well grid on screen. The full run
+      finished with no errors, and all 384 wells matched the bitmap
+      exactly (64 filled at 20uL, 320 empty) once the animation queue
+      caught up, with the reservoir drawn down to exactly the expected
+      3720uL (5000 - 64*20).
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

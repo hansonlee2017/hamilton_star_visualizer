@@ -91,7 +91,21 @@ def liquid_surface_point(
   """
 
   loc = _apply_offset(resource.get_absolute_location(x="c", y="c", z="b"), offset)
-  bottom_z = loc.z + (getattr(resource, "material_z_thickness", None) or 0)
+  # `material_z_thickness` is a *property* on Container (see PyLabRobot's
+  # own container.py), not a plain attribute -- for a resource that never
+  # had it set (real for several real labware definitions, e.g. Tecan's
+  # HalfDeepWell_384_Well), accessing it doesn't leave it merely absent, it
+  # actively raises NotImplementedError. `getattr(..., default)` only
+  # rescues a *missing* attribute (AttributeError); a property that raises
+  # something else on access propagates straight through it regardless of
+  # the default given, so this needs its own explicit fallback instead
+  # (confirmed live -- a plain getattr() here crashed the very first
+  # dispense against such a plate -- see docs/PLAN.md's "Review round 29").
+  try:
+    material_z_thickness = resource.material_z_thickness
+  except (NotImplementedError, AttributeError):
+    material_z_thickness = 0
+  bottom_z = loc.z + (material_z_thickness or 0)
 
   if liquid_height is None:
     liquid_height = 0.0
