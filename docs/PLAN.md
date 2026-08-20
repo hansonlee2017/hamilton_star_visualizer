@@ -1323,6 +1323,36 @@ aren't confused for each other.
       by screenshot) rather than the flat gray every other HUD control
       uses.
 
+## Review round 21 (2026-08-19)
+
+User request: change the aspiration flow color from blue to orange.
+
+- [x] **Split the single shared flow texture into two.** A channel's
+      mid-pipetting tip glow (`Channel.flowPulse()`) used one shared blue
+      gradient texture for both directions -- aspirate just scrolled it one
+      way, dispense the other, so aspirate and dispense looked identical
+      apart from which way the stripes moved. `createFlowTexture()` now
+      takes its two gradient-stop colors as parameters instead of having
+      them hardcoded, and there are two module-level base textures built
+      from it: `FLOW_TEXTURE_ASPIRATE` (orange, `#ffe3bf`/`#c4752f`) and
+      `FLOW_TEXTURE_DISPENSE` (blue, `#bfeaff`/`#2f8fc4`, the original
+      colors, unchanged). Each `Channel` clones both once (so its own
+      scroll-offset animation can't fight another channel's, same reason
+      the single shared texture was cloned per-channel before), and
+      `flowPulse(direction)` just picks between the two clones by sign
+      instead of always using the one texture it used to.
+
+      Verified live, at the texture level rather than by eyeballing a
+      screenshot (a flow pulse only lasts ~550ms, awkward to catch on
+      camera reliably): patched a polling loop into the live page reading
+      each channel's `tipMesh.material.map` (only non-null mid-pulse) and
+      sampling the underlying canvas's actual rendered pixel color.
+      Caught both directions live across a real run: a dispense pulse
+      read back `rgb(51,145,197)` (`#3391c5`, matching the unchanged blue
+      stops exactly) and an aspirate pulse read back `rgb(197,120,51)`
+      (`#c57833`, matching the new orange stops exactly) -- not just "some
+      color changed," the literal on-screen pixels for each direction.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

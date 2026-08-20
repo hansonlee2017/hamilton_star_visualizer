@@ -759,17 +759,17 @@ scene.add(gantryGroup);
 // A small repeating-stripe gradient, scrolled via `map.offset.y` to read as
 // liquid flowing up (aspirate) or down (dispense) through the tip. Built
 // once on a canvas -- cheap, no external assets, no shader code.
-function createFlowTexture() {
+function createFlowTexture(lightColor, darkColor) {
   const canvas = document.createElement("canvas");
   canvas.width = 8;
   canvas.height = 64;
   const ctx = canvas.getContext("2d");
   const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  gradient.addColorStop(0.0, "#bfeaff");
-  gradient.addColorStop(0.25, "#2f8fc4");
-  gradient.addColorStop(0.5, "#bfeaff");
-  gradient.addColorStop(0.75, "#2f8fc4");
-  gradient.addColorStop(1.0, "#bfeaff");
+  gradient.addColorStop(0.0, lightColor);
+  gradient.addColorStop(0.25, darkColor);
+  gradient.addColorStop(0.5, lightColor);
+  gradient.addColorStop(0.75, darkColor);
+  gradient.addColorStop(1.0, lightColor);
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -779,7 +779,12 @@ function createFlowTexture() {
   texture.repeat.set(1, 3);
   return texture;
 }
-const FLOW_TEXTURE = createFlowTexture();
+// Aspirate (liquid entering the tip) and dispense (leaving it) get their
+// own colors -- orange vs. blue -- so which direction a channel's mid-flow
+// pulse is doing is readable from the color alone, not just the scroll
+// direction (subtle at a glance, especially at a distance or mid-animation).
+const FLOW_TEXTURE_ASPIRATE = createFlowTexture("#ffe3bf", "#c4752f");
+const FLOW_TEXTURE_DISPENSE = createFlowTexture("#bfeaff", "#2f8fc4");
 const FLOW_PULSE_MS = 550;
 
 class Channel {
@@ -828,9 +833,12 @@ class Channel {
     // pick-up itself.
     this.tipLength = CHANNEL_TIP_HEIGHT;
 
-    // Own clone so this channel's scroll offset can't fight another
-    // channel's concurrent (and possibly opposite-direction) flowPulse().
-    this.flowTexture = FLOW_TEXTURE.clone();
+    // Own clones (one per direction) so this channel's scroll offset can't
+    // fight another channel's concurrent flowPulse(), and so an aspirate
+    // pulse and a dispense pulse never have to share one texture's offset
+    // state even on the same channel.
+    this.aspirateFlowTexture = FLOW_TEXTURE_ASPIRATE.clone();
+    this.dispenseFlowTexture = FLOW_TEXTURE_DISPENSE.clone();
 
     gantryGroup.add(this.group);
     this.applyPosition();
@@ -869,12 +877,13 @@ class Channel {
     setTimeout(() => this.body.material.color.setHex(0x9aa0a8), 250 * durationScale);
   }
 
-  // direction: +1 to scroll "up" (aspirate -- liquid entering the tip),
-  // -1 to scroll "down" (dispense -- liquid leaving it).
+  // direction: +1 to scroll "up" (aspirate -- liquid entering the tip,
+  // orange), -1 to scroll "down" (dispense -- liquid leaving it, blue).
   flowPulse(direction) {
     const material = this.tipMesh.material;
     const restoreColor = material.color.clone();
-    material.map = this.flowTexture;
+    const texture = direction > 0 ? this.aspirateFlowTexture : this.dispenseFlowTexture;
+    material.map = texture;
     material.color.setHex(0xffffff); // let the texture's own colors show through
     material.needsUpdate = true;
 
@@ -882,7 +891,7 @@ class Channel {
     const duration = FLOW_PULSE_MS * durationScale;
     const step = (now) => {
       const t = Math.min(1, (now - start) / duration);
-      this.flowTexture.offset.y = direction * t * 2; // a couple of texture repeats' worth of scroll
+      texture.offset.y = direction * t * 2; // a couple of texture repeats' worth of scroll
       if (t < 1) {
         requestAnimationFrame(step);
       } else {
