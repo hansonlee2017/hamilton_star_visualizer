@@ -11,6 +11,15 @@ don't share a column and breaks the motion into a real, hardware-feasible
 sequence of arm stops on its own -- one call in, one realistic animation
 out, no gantry-planning code in this file at all.
 
+Deliberately no ``asyncio.sleep()`` calls anywhere in this script. The
+browser's own animation queue is entirely decoupled from how fast these
+calls actually run -- each channel's queue plays out its own real ~1.6s/leg
+pace regardless of how quickly the backend sends the events that filled it
+(see picogreen_demo.py's module docstring, and docs/PLAN.md's "Review
+round 25", for the full reasoning and the one real tradeoff: a ``replay()``
+of a run recorded without any pacing plays back in a couple of seconds
+rather than at anything resembling the original pace).
+
 Run it with:
 
     uv run python examples/cherry_pick_demo.py
@@ -84,16 +93,13 @@ async def main() -> None:
   dest_wells = dest_plate[SMILEY_WELLS]
 
   await lh.pick_up_tips(tip_rack["A1:H1"])
-  await asyncio.sleep(0.5)
 
   await lh.aspirate(source_wells, vols=[40.0] * 8)
-  await asyncio.sleep(0.5)
 
   # The smiley targets are scattered across 6 columns -- an ordinary,
   # single multi-channel dispense call. The visualizer works out the real
   # column-by-column gantry motion on its own.
   await lh.dispense(dest_wells, vols=[40.0] * 8)
-  await asyncio.sleep(0.5)
 
   await lh.discard_tips()
 

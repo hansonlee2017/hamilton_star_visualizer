@@ -6,6 +6,15 @@ PyLabRobot's own ``LiquidHandlerChatterboxBackend`` (which just prints what
 it's doing -- no real hardware involved), and streams every step to the
 browser via ``VisualizerBackend``.
 
+Deliberately no ``asyncio.sleep()`` calls anywhere in this script. The
+browser's own animation queue is entirely decoupled from how fast these
+calls actually run -- each channel's queue plays out its own real ~1.6s/leg
+pace regardless of how quickly the backend sends the events that filled it
+(see picogreen_demo.py's module docstring, and docs/PLAN.md's "Review
+round 25", for the full reasoning and the one real tradeoff: a ``replay()``
+of a run recorded without any pacing plays back in a couple of seconds
+rather than at anything resembling the original pace).
+
 Run it with:
 
     uv run python examples/demo_protocol.py
@@ -78,24 +87,16 @@ async def main() -> None:
   # -- pick up 8 fresh tips, aspirate from the source plate, dispense to ----
   # -- the destination plate, and discard the tips to trash (discard_tips, -
   # -- not drop_tips -- see README) ------------------------------------------
-  # A small pause between operations paces the demo so it's watchable (the
-  # ChatterboxBackend, unlike real hardware, returns instantly) -- it also
-  # gives the browser's per-op animation (~1.6s, see frontend/main.js) room
-  # to play out before the next event arrives.
   columns = ["1", "2", "3"]
   for col in columns:
     well_range = f"A{col}:H{col}"
 
     await lh.pick_up_tips(tip_rack[well_range])
-    await asyncio.sleep(0.5)
 
     await lh.aspirate(source_plate[well_range], vols=[50.0] * 8)
-    await asyncio.sleep(0.5)
     await lh.dispense(dest_plate[well_range], vols=[50.0] * 8)
-    await asyncio.sleep(0.5)
 
     await lh.discard_tips()
-    await asyncio.sleep(0.5)
 
   print("Demo protocol finished. Leaving the server up -- Ctrl+C to exit.")
   await asyncio.Event().wait()

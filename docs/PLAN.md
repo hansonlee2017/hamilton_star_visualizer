@@ -1719,6 +1719,32 @@ top of \[the destination\] before going down in Z."
       interpolation noise at a leg boundary rather than the reported bug.
       Full run still finished with every volume exactly correct.
 
+## Review round 28 (2026-08-19)
+
+User request: apply round 25's `asyncio.sleep()` removal to the other two
+demos, `cherry_pick_demo.py` and `demo_protocol.py`.
+
+- [x] **Removed every `asyncio.sleep()` from both scripts.** Same
+      reasoning as round 25: the browser's animation queue is already
+      fully decoupled from backend timing, so these were never load-
+      bearing for anything the browser shows -- just cosmetic pacing (and,
+      for `replay()`, original-gap preservation, now traded away the same
+      way picogreen_demo.py already was). `demo_protocol.py`'s per-column
+      loop also had a stale comment specifically justifying the pacing
+      ("gives the browser's per-op animation... room to play out before
+      the next event arrives") -- removed along with the sleeps, since
+      that was never actually true (the animation queue was always
+      independent of it). Both scripts gained the same short docstring
+      note picogreen_demo.py already carries, pointing at the fuller
+      reasoning there and at this round.
+
+      Verified live: both finished with no errors, and once each browser's
+      animation queue caught up, every volume was exactly correct --
+      `demo_protocol.py`'s 3 columns each left source wells at 150uL (200
+      - 50) and dest wells at 50uL; `cherry_pick_demo.py`'s source column
+      landed at 110uL (150 - 40) and all 8 smiley-pattern wells at exactly
+      40uL.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
