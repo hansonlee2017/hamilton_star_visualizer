@@ -96,6 +96,15 @@ examples/picogreen_demo.py         PicoGreen dsDNA quantitation demo: an 8-point
                                     and PicoGreen-reagent transfers into an assay plate --
                                     exercises a reservoir, Eppendorf tubes, and a second
                                     plate type alongside the usual carriers/tip racks
+examples/pixel_art_demo.py         pixel-art demo: 5 x 96-well Corning plates on one plate
+                                    carrier, each painting one letter of "ROCHE" in portrait
+                                    orientation via a real Hamilton multi-dispense pattern
+                                    (aspirate 300uL once, dispense 30uL up to 10 times,
+                                    returning each channel's exact leftover to the shared
+                                    reservoir with empty=True instead of discarding tips)
+examples/custom_labware.py         a real custom Plate definition (a Cellvis 384-well
+                                    glass-bottom plate) not yet in PyLabRobot's own catalog,
+                                    built the same way its own catalog entries are
 ```
 
 ## Development

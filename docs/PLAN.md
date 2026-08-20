@@ -1808,6 +1808,113 @@ plate, 50uL tips, a 60mL reservoir.
       caught up, with the reservoir drawn down to exactly the expected
       3720uL (5000 - 64*20).
 
+## Review round 30 (2026-08-19)
+
+User request: rework `pixel_art_demo.py` from a single 384-well heart to 5
+separate 96-well Corning plates on one plate carrier, each painting one
+letter of "ROCHE" in portrait mode, using 300uL tips with a real
+multi-dispense pattern (aspirate 300uL once, dispense 30uL up to 10 times
+before re-aspirating), with dispense batches grouped by plate column.
+Three follow-up rounds of live feedback arrived as the rework was
+verified; all are covered below.
+
+- [x] **`examples/pixel_art_demo.py` rewritten end to end.** Five bold
+      block-letter bitmaps (`LETTERS`, 12 rows x 8 columns each --
+      R=44/O=34/C=26/H=56/E=58 filled cells, hand-designed and verified via
+      an ASCII-render script before use), one `cor_96_wellplate_360uL_Fb`
+      per letter on `PLT_CAR_L5AC_A00` (confirmed to have exactly 5 sites),
+      `hamilton_96_tiprack_300uL_filter` tips. `letter_row_batches()` maps
+      each bitmap row onto one plate column and each bitmap column onto one
+      plate row letter -- since a 96-well plate is natively wider (12
+      columns) than tall (8 rows), this puts the letter's tall axis on the
+      plate's column axis, its width axis on the plate's row axis: portrait
+      orientation without physically rotating the plate. Every bitmap row
+      is <=8 cells wide and lands in a single plate column, so grouping
+      dispenses by bitmap row satisfies both the 8-channel limit and the
+      user's "group by column for faster dispense" follow-up with no extra
+      rechunking logic. `DISPENSES_PER_ASPIRATE = 10` (300uL / 30uL) chunks
+      each letter's 12 rows into 2 aspirate cycles.
+- [x] **Bug: reused tips overflowed between aspirate cycles (found live,
+      fixed).** A bitmap row's width varies 3-8 cells, so a channel not
+      needed on every row of a 10-row cycle ends the cycle still holding
+      leftover volume -- one of "R"'s channels used only 2 of its first
+      cycle's 10 rows, leaving 240uL in the tip. The very next aspirate
+      (originally: same tip, next cycle) tried to add another 300uL on top,
+      overflowing the tip's real 360uL capacity
+      (`TooLittleVolumeError: 300.0uL > 120.0uL`, i.e. only 120uL of free
+      space left). First fixed by discarding tips every cycle instead of
+      every letter (10 tip pick-ups total); superseded by the leftover-
+      return fix below once the user asked for it.
+- [x] **Bug: a plain row<->column transpose mirrors, it doesn't rotate
+      (found live via user report, fixed).** `letter_row_batches()`
+      originally read bitmap column `c` as plate row `PLATE_ROWS[c]`.
+      Swapping two axes with neither reversed is a *reflection* across the
+      diagonal, not a 90-degree rotation -- confirmed live when "R" rendered
+      as its own mirror image on the plate. Fixed by reversing one axis
+      while swapping (`PLATE_ROWS[7 - c]`), which turns the reflection into
+      the intended rotation. User confirmed live afterward: "The letters
+      look fine."
+- [x] **Follow-up: channel index should match row order for faster,
+      non-diagonal gantry motion (user request, implemented).** The initial
+      un-mirror fix built each row-batch's channel list by iterating bitmap
+      columns in (reversed) order, which wasn't necessarily ascending by
+      row letter -- a real gantry channel is physically fixed to one row, so
+      an out-of-order list would make a channel dispense into a different
+      row than its neighbors, reaching diagonally for no reason. Fixed by
+      sorting `rows` ascending, then (see the next item) pinning each row
+      letter to an explicit, *permanently* matching channel index rather
+      than relying on PyLabRobot's positional default.
+- [x] **Follow-up: return leftover ink to the reservoir with `empty=True`
+      instead of discarding tips (user request, implemented).** Rather than
+      wasting each cycle's leftover ink by discarding the tip that held it,
+      each cycle now ends with an explicit `lh.dispense()` back to
+      `ink_reservoir` for every channel that has leftover, using
+      PyLabRobot's real `empty=True` dispense-mode flag (a genuine
+      `STARBackend.dispense()` kwarg -- forwarded through
+      `visualizer_backend.py`'s `dispense()` like any other backend kwarg,
+      confirmed to reach `LiquidHandlerChatterboxBackend` and print in its
+      log without needing any code changes there). This requires knowing
+      each channel's *exact* leftover, which requires a channel to mean the
+      same plate row on every dispense call within a cycle -- so
+      `letter_row_batches()` now sorts `rows` ascending (previous item) and
+      `main()` passes `use_channels=[PLATE_ROWS.index(row) for row in
+      rows]` explicitly instead of PyLabRobot's positional default,
+      tracking a `dispense_count` per row letter per cycle to compute exact
+      leftover (`300uL - dispense_count * 30uL`). One tip pick-up now
+      spans a whole letter's two cycles again (5 pick-ups total, not 10),
+      since a tip returned to empty is safe to reuse. Verified live: the
+      very first cycle's logged leftover volumes (A:300, B:120, C:210,
+      D:180, E:210, F:240uL) matched a hand-computed check exactly, and the
+      `empty` column appeared correctly in the Chatterbox log for every
+      return dispense.
+- [x] **Follow-up: move the reservoir to carrier site 2 (user request,
+      implemented).** `reservoir_carrier[0] = ink_reservoir` changed to
+      `reservoir_carrier[2]` (`Trough_CAR_5R60_A00` has 4 sites, confirmed
+      live). Verified live: the reservoir renders at the carrier's third
+      slot, not its first.
+- [x] **Answered, not changed: why do PicoGreen-specific run params show up
+      for every demo?** `frontend/index.html`'s "run-params" HUD (sample
+      volume/count inputs, PicoGreen readout) is hardcoded into the one
+      shared page, built originally for `picogreen_demo.py`; `main.js`'s
+      Start-button handler always packages `sample_volume_ul`/
+      `sample_count` into the `start_protocol` message regardless of which
+      script is listening, and every other demo's `backend.wait_for_start()`
+      just receives a params dict it never reads. Not PicoGreen-specific to
+      *this* demo's correctness (pixel_art_demo.py ignores the returned
+      params entirely), but a real "one hardcoded HUD for every protocol"
+      simplification -- left as-is pending explicit user direction on how
+      they'd want it generalized.
+
+      Verified live end-to-end after all of the above: the backend run
+      finished with zero errors, and every one of the 218 filled wells
+      (44+34+26+56+58 across the 5 plates) matched its letter's bitmap
+      exactly once the animation queue caught up (0 anomalies from a full
+      `resourceIndex` sweep of all 5 plates' 96 wells each). The reservoir
+      (pre-filled to 10,000uL) settled at exactly the hand-computed
+      3,460uL -- 10,000 - 218*30, confirming the leftover-return math
+      returns precisely what it aspirates but doesn't deliver, not merely
+      "approximately".
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
