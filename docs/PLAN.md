@@ -1455,6 +1455,77 @@ rise/retract.
       rather than fixed here, since it's unrelated to what this round
       changed.
 
+## Review round 23 (2026-08-19)
+
+User report: a long delay between the serial dilution and PicoGreen setup
+stages; during PicoGreen dispense, tips appear to pierce through wells and
+clip through the reservoir, with the pipette seeming to *raise* rather
+than lower during dispense; and a request to extend the round-22 traverse-
+height optimization to the sample/standard transfer, standard/TE
+aspiration from their tubes, and the serial dilution phases.
+
+- [x] **Root-caused and fixed the piercing/clipping bug -- a frame
+      mismatch, not a cosmetic issue.** `traverseHeightMm`/`endHeightMm`
+      are expressed in *tip-point* terms (how high the tip's own point
+      should clear a resource by), matching `entry.z`. But every leg in
+      `animateChannelOp()` moves the *channel body origin*, which sits
+      *above* the tip's point by the tip's own length (`targetZ() =
+      entry.z + tipLength`) -- round 22 set the rise/retract Z targets to
+      the raw tip-point height directly, never adding that offset. For the
+      assay-plate dispense specifically, the real required body-origin
+      depth (~246.55mm, `entry.z` + a 300uL tip's ~59.9mm) ended up
+      *deeper* than the buggy rise/retract target (202.32mm, un-offset) --
+      inverting the sequence: the leg labeled "rise" (202.32) was actually
+      *below* the leg labeled "descend" (246.55), so the channel visibly
+      moved *up* where it should move *down*, and while traveling at that
+      wrong height the tip's own rendered point sat below the plate's rim
+      -- exactly "pierce through the well." Fixed by converting
+      `traverseHeightMm`/`endHeightMm` to body-origin terms (`+ this op's
+      own tip length`) before using them, resolved lazily via `targetZ()`
+      itself rather than a separately-captured value -- for the same
+      staleness reason `targetZ()` was already a function (`ch.tipLength`
+      can't be read at enqueue time; see `enqueue()`'s docstring). Also
+      extended `Channel.update()`/`enqueue()` to support a duration
+      *function* (`(from, target) => number`), not just a number, so the
+      leg-duration fraction can use the same freshly-resolved values
+      instead of being computed too early.
+
+      Verified two ways: (1) by hand, using the exact real numbers from a
+      live run -- with the fix, the reservoir aspirate's rise
+      (body-origin) resolves to 293.9mm, comfortably above its own descend
+      depth (233.45mm) by 60.45mm (previously a broken ~0.55mm gap), and
+      the tip's own rendered height during travel comes out to exactly
+      234mm -- the intended 5mm above the reservoir's 229mm rim, not 55mm
+      *below* it. (2) live: polled channel 0's actual rendered Z during a
+      real run and confirmed samples landing within 3mm of both corrected
+      values (293.9, 262.22), with the trajectory never exceeding `restZ`
+      or dropping below any real working depth -- no inversion signature
+      anywhere in the trace.
+- [x] **Extended the traverse-height optimization to every phase named**:
+      standard/TE tube aspiration, the serial dilution's own aspirate/
+      dispense pairs (both within the sample plate), and the sample/
+      standard transfer loop's aspirate (sample plate) and dispense (assay
+      plate). Moved the five per-resource heights (sample plate, assay
+      plate, reservoir, DNA stock tube, TE tube) to one shared computation
+      near the top of the run instead of a local copy inside just the
+      PicoGreen loop.
+- [x] **Shrank the post-dilution wait to match.** The old
+      `dilution_stage_legs * 1.6s * 1.3` treated all 24 legs as full-height
+      (~1.6s each); now only `pick_up_tips`/`discard_tips` (2 of the 24)
+      still rise/retract to the full global safe height -- the other 22
+      all carry a traverse-height override, so their rise/retract legs are
+      shorter. Reworded as a weighted estimate (2 legs @ 1.6s + 22 legs @
+      ~1.1s) with the same 1.3x safety margin round 9 established, rather
+      than a uniform 1.6s/leg applied to legs that no longer take that
+      long.
+
+      Verified live: the full run (dilution -> PicoGreen -> sample/
+      standard transfer) completed with all 32 assay wells at exactly
+      200uL, the standard curve at 95/95/95/95/95/95/195/95uL, and the
+      reservoir at exactly the designed 1000uL residual -- no regressions
+      from moving/duplicating the height computations or reworking the
+      wait's derivation.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

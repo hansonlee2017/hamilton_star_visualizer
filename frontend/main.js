@@ -926,6 +926,11 @@ class Channel {
   // update(), sidesteps that: by then, this channel's queue is strictly
   // FIFO, so anything enqueued earlier (including a preceding
   // pick_up_tips's onArrive) is guaranteed to have already run.
+  // `duration` may also be a function (`(from, target) => number`), same
+  // reasoning as `target.z` just above -- see animateChannelOp()'s
+  // traverseHeightMm/endHeightMm handling for a leg whose duration depends
+  // on values (this op's own tip length) that aren't safe to read until
+  // the leg actually starts either.
   enqueue(target, duration, onComplete) {
     this.queue.push({ target, duration, onComplete });
   }
@@ -940,6 +945,11 @@ class Channel {
         if (this.current.target.y === null) this.current.target.y = this.current.from.y;
         if (this.current.target.z === null) this.current.target.z = this.current.from.z;
         if (typeof this.current.target.z === "function") this.current.target.z = this.current.target.z();
+        // Resolved after target.z above, not before -- a duration function
+        // can use the now-numeric target/from to compute its own span.
+        if (typeof this.current.duration === "function") {
+          this.current.duration = this.current.duration(this.current.from, this.current.target);
+        }
       }
     }
     if (!this.current) return;
@@ -1041,22 +1051,49 @@ function animateChannelOp(entry, { onArrive, tipLength, traverseHeightMm, endHei
   // `ch.tipLength` must be read when the leg *starts*, not now.
   const targetZ = () => entry.z + (tipLength ?? ch.tipLength);
 
-  // A custom height only ever means "don't go all the way up to restZ" --
-  // never above it (a channel should never need to clear more than the
-  // deck's own tallest labware) and never below this op's own working
-  // depth (it still has to reach entry.z to do anything). Clamping first,
-  // then measuring this leg's actual span as a fraction of the *nominal*
-  // full span (working depth -> restZ) gives a duration that's
-  // proportionally shorter the less far this leg actually has to travel --
-  // 1.0 (the full RISE_MS/RETRACT_MS, unchanged from before this existed)
-  // whenever no override is given, since riseZ/retractZ then just equal
-  // restZ and the fraction is exactly 1.
-  const nominalSpan = Math.max(1, restZ - entry.z);
-  const clampHeight = (h) => Math.min(restZ, Math.max(entry.z, h));
-  const riseZ = traverseHeightMm != null ? clampHeight(traverseHeightMm) : restZ;
-  const retractZ = endHeightMm != null ? clampHeight(endHeightMm) : restZ;
-  const riseMs = Math.max(MIN_LEG_MS, scaled(RISE_MS) * ((riseZ - entry.z) / nominalSpan));
-  const retractMs = Math.max(MIN_LEG_MS, scaled(RETRACT_MS) * ((retractZ - entry.z) / nominalSpan));
+  // traverseHeightMm/endHeightMm (see events.py's channel_ops_event()
+  // docstring) are expressed in *tip-point* terms -- how high the tip's
+  // own point should clear a resource by -- exactly like `entry.z` above,
+  // not like the *body-origin* Z every leg here actually moves (targetZ()).
+  // Converting between the two needs `+ this op's own tip length`, the
+  // same quantity targetZ() uses -- getting this wrong doesn't just look
+  // slightly off: since a typical tip is ~50-95mm long, using a tip-point
+  // height directly as a body-origin Z can put the rise/retract leg
+  // *below* the descend leg's own body-origin Z (a real bug this once
+  // was -- see docs/PLAN.md's "Review round 23"), which both inverts the
+  // rise-then-descend order (the channel visibly moves *up* where it
+  // should move *down*) and, during the X/Y travel at that wrong height,
+  // puts the tip's own rendered point below the resource's rim it was
+  // supposed to be clearing -- exactly the "pierce through the well"/
+  // "clip through the reservoir" look. Resolved lazily via targetZ()
+  // itself (not a separately-captured tipLength), for the same staleness
+  // reason targetZ() is a function to begin with.
+  function bodyHeightFor(tipHeightMm) {
+    return () => {
+      const bodyFloor = targetZ();
+      return Math.min(restZ, Math.max(bodyFloor, tipHeightMm + (tipLength ?? ch.tipLength)));
+    };
+  }
+  // Duration proportional to how much of the *nominal* body-origin span
+  // (this op's own working depth -> restZ) this leg's resolved height
+  // actually covers -- 1.0 (the unchanged RISE_MS/RETRACT_MS) whenever no
+  // override applies, since the resolved height then just equals restZ.
+  // A function for the same reason the height itself is: `target.z` above
+  // is only a number by the time this runs (see update()'s resolution
+  // order), but the *nominal span*'s floor is this op's own body-origin
+  // depth, which still needs its own fresh targetZ() call here.
+  function legDuration(nominalMs) {
+    return (from, target) => {
+      const bodyFloor = targetZ();
+      const span = Math.max(1, restZ - bodyFloor);
+      return Math.max(MIN_LEG_MS, scaled(nominalMs) * ((target.z - bodyFloor) / span));
+    };
+  }
+
+  const riseZ = traverseHeightMm != null ? bodyHeightFor(traverseHeightMm) : restZ;
+  const retractZ = endHeightMm != null ? bodyHeightFor(endHeightMm) : restZ;
+  const riseDuration = traverseHeightMm != null ? legDuration(RISE_MS) : scaled(RISE_MS);
+  const retractDuration = endHeightMm != null ? legDuration(RETRACT_MS) : scaled(RETRACT_MS);
 
   // x/y: null means "stay wherever this leg actually starts" -- see
   // enqueue()'s docstring for why that can't just be ch.pos.x/y here.
@@ -1066,14 +1103,14 @@ function animateChannelOp(entry, { onArrive, tipLength, traverseHeightMm, endHei
   // planGantryPasses() below for the same "x is shared, y is per-channel"
   // fact applied *across* channels, not just within one channel's own
   // approach.
-  ch.enqueue({ x: null, y: null, z: riseZ }, riseMs);
+  ch.enqueue({ x: null, y: null, z: riseZ }, riseDuration);
   ch.enqueue({ x: entry.x, y: null, z: riseZ }, scaled(X_MOVE_MS));
   ch.enqueue({ x: entry.x, y: entry.y, z: riseZ }, scaled(Y_MOVE_MS));
   // onArrive fires exactly when this leg's tween completes -- see enqueue()'s
   // docstring for why that's not the same as a fixed setTimeout delay.
   ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(DESCEND_MS), onArrive);
   ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(HOLD_MS));
-  ch.enqueue({ x: entry.x, y: entry.y, z: retractZ }, retractMs);
+  ch.enqueue({ x: entry.x, y: entry.y, z: retractZ }, retractDuration);
 }
 
 // Hamilton STAR's standard channel spacing -- also the minimum center-to-

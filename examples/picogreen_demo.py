@@ -351,6 +351,38 @@ async def main() -> None:
 
     standard_wells = res.sample_plate[[f"{row}{STANDARD_COLUMN}" for row in ROWS]]
 
+    # Real STARBackend.aspirate()/dispense() kwargs -- minimum_traverse_
+    # height_at_beginning_of_a_command (how high to rise before moving in
+    # X/Y) and min_z_endpos (how high to retract to afterward). Both
+    # default, on real hardware, to a conservative global "clear the whole
+    # deck" height (STARBackend's own default is 245mm); every aspirate/
+    # dispense below only ever needs to clear the *specific* resource it's
+    # working with, not the whole deck -- the diluent tube, the DNA stock
+    # tube, the sample plate (both the dilution stage's own wells and the
+    # sample/standard transfer's source), and the assay plate never move
+    # out from under a channel mid-stage, so none of them need the global
+    # safe height. Grounded in this run's actual resources, not guessed:
+    # each resource's own real top surface plus a small clearance margin.
+    # A demo-only quirk: LiquidHandlerChatterboxBackend has no motion model
+    # to begin with (it just prints a table row -- see chatterbox.py), so
+    # this has no effect on how long the *backend* call takes here or on a
+    # real robot's *pipetting* time either; it's genuinely a real-hardware
+    # optimization for the seconds a physical arm would otherwise spend
+    # traveling to and from a needlessly high safe height between
+    # transfers. The visualizer *does* render it, though -- see events.py's
+    # channel_ops_event() and frontend/main.js's animateChannelOp() for the
+    # rest of this path.
+    TRAVERSE_CLEARANCE_MM = 5.0
+
+    def traverse_height_for(resource) -> float:
+      return resource.get_absolute_location(z="top").z + TRAVERSE_CLEARANCE_MM
+
+    sample_plate_traverse_height = traverse_height_for(res.sample_plate)
+    assay_plate_traverse_height = traverse_height_for(res.assay_plate)
+    reservoir_traverse_height = traverse_height_for(res.picogreen_reservoir)
+    dna_stock_traverse_height = traverse_height_for(res.dna_stock)
+    te_diluent_traverse_height = traverse_height_for(res.te_diluent)
+
     # -- standard curve: 2-fold serial dilution --------------------------------
     # All the dilution-stage volumes (100-200uL) call for 300uL tips. One
     # column, all 8 rows -> channels 0-7 -- picked up once, then used
@@ -366,8 +398,20 @@ async def main() -> None:
     # 7 dispense into their own row's well simultaneously, since B12-H12
     # share a column.
     for channel in range(1, 8):
-      await lh.aspirate([res.te_diluent], vols=[DILUTION_VOLUME], use_channels=[channel])
-    await lh.dispense(standard_wells[1:], vols=[DILUTION_VOLUME] * 7, use_channels=list(range(1, 8)))
+      await lh.aspirate(
+        [res.te_diluent],
+        vols=[DILUTION_VOLUME],
+        use_channels=[channel],
+        minimum_traverse_height_at_beginning_of_a_command=te_diluent_traverse_height,
+        min_z_endpos=te_diluent_traverse_height,
+      )
+    await lh.dispense(
+      standard_wells[1:],
+      vols=[DILUTION_VOLUME] * 7,
+      use_channels=list(range(1, 8)),
+      minimum_traverse_height_at_beginning_of_a_command=sample_plate_traverse_height,
+      min_z_endpos=sample_plate_traverse_height,
+    )
     await asyncio.sleep(0.3)
 
     # Top standard: the neat 100 ng/uL stock, no dilution -- channel 0. *2x*
@@ -375,38 +419,81 @@ async def main() -> None:
     # back out of it for the A->B transfer. Without the extra headroom, A12
     # would be left at 0uL: enough to make the dilution series arithmetic
     # work, but nothing left for this well's own assay-plate transfer later.
-    await lh.aspirate([res.dna_stock], vols=[DILUTION_VOLUME * 2], use_channels=[0])
-    await lh.dispense([standard_wells[0]], vols=[DILUTION_VOLUME * 2], use_channels=[0])
+    await lh.aspirate(
+      [res.dna_stock],
+      vols=[DILUTION_VOLUME * 2],
+      use_channels=[0],
+      minimum_traverse_height_at_beginning_of_a_command=dna_stock_traverse_height,
+      min_z_endpos=dna_stock_traverse_height,
+    )
+    await lh.dispense(
+      [standard_wells[0]],
+      vols=[DILUTION_VOLUME * 2],
+      use_channels=[0],
+      minimum_traverse_height_at_beginning_of_a_command=sample_plate_traverse_height,
+      min_z_endpos=sample_plate_traverse_height,
+    )
     await asyncio.sleep(0.3)
 
     # Serial 2-fold dilution across A12-G12 -- channel 0 alone, continuing
     # with the same tip it started with (descending concentration the whole
     # way, so no cross-contamination concern). H12 is deliberately never
-    # touched again here, so it stays pure diluent (the blank).
+    # touched again here, so it stays pure diluent (the blank). Source and
+    # destination are both sample_plate wells throughout, so both legs use
+    # the same traverse height.
     for source, target in zip(standard_wells[:-2], standard_wells[1:-1]):
-      await lh.aspirate([source], vols=[DILUTION_VOLUME], use_channels=[0])
-      await lh.dispense([target], vols=[DILUTION_VOLUME], use_channels=[0])
+      await lh.aspirate(
+        [source],
+        vols=[DILUTION_VOLUME],
+        use_channels=[0],
+        minimum_traverse_height_at_beginning_of_a_command=sample_plate_traverse_height,
+        min_z_endpos=sample_plate_traverse_height,
+      )
+      await lh.dispense(
+        [target],
+        vols=[DILUTION_VOLUME],
+        use_channels=[0],
+        minimum_traverse_height_at_beginning_of_a_command=sample_plate_traverse_height,
+        min_z_endpos=sample_plate_traverse_height,
+      )
       await asyncio.sleep(0.2)
 
     await lh.discard_tips()
     # A real Hamilton's 8 channels share one arm (see frontend/main.js's
     # planGantryPasses() docstring): even with channels 1-7 dragged along
     # for realism during the steps above, the *whole arm* was still tied up
-    # the entire time -- dragging a channel along still takes the same
-    # ~1.6s/leg as doing real work, it just isn't idle-and-ignored the way
-    # an earlier version of this demo left it. So this wait is still the
-    # real time nothing else could start, not a workaround: every channel
-    # ends this stage with exactly 24 legs of animation (pick-up, 7 diluent-
+    # the entire time -- dragging a channel along still takes as long as
+    # doing real work, it just isn't idle-and-ignored the way an earlier
+    # version of this demo left it. So this wait is still the real time
+    # nothing else could start, not a workaround: every channel ends this
+    # stage with exactly 24 legs of animation (pick-up, 7 diluent-
     # distribution stops -- one real aspirate each, dragged along for the
     # other 6 -- the shared dispense, top-standard aspirate+dispense, 6
     # serial aspirate/dispense pairs, discard), each a full rise+x+y+
-    # descend+hold+retract cycle (~1.6s at 1x), plus a margin (round 9's
-    # cherry-pick demo found even a ~500ms/1.6s margin on a *single* pass
-    # needed live tuning -- scaling that same proportion up over this many
-    # legs is safer than guessing).
-    dilution_stage_legs = 24
-    seconds_per_leg = 1.6
-    await asyncio.sleep(dilution_stage_legs * seconds_per_leg * 1.3)
+    # descend+hold+retract cycle. Only pick_up_tips/discard_tips (2 of the
+    # 24) still rise/retract to the full global safe height (~1.6s/leg);
+    # the other 22 all pass the traverse-height overrides above, so their
+    # rise/retract legs are shorter -- ~1.1s/leg is an estimate (X/Y/
+    # descend/hold are unaffected; only rise+retract shrink, by a fraction
+    # that depends on each resource's own top height, verified live this
+    # round -- see docs/PLAN.md's "Review round 23"). Still an estimate,
+    # not a computed guarantee (this wait can't read the
+    # frontend's actual per-op fraction), so it keeps the same proportional
+    # safety margin round 9's cherry-pick demo found necessary, just
+    # applied to a smaller, more accurate base instead of scaling up a
+    # uniform 1.6s/leg across every leg regardless of whether it actually
+    # still takes that long.
+    dilution_stage_legs_full_height = 2  # pick_up_tips, discard_tips
+    dilution_stage_legs_reduced_height = 22
+    seconds_per_leg_full_height = 1.6
+    seconds_per_leg_reduced_height = 1.1
+    await asyncio.sleep(
+      (
+        dilution_stage_legs_full_height * seconds_per_leg_full_height
+        + dilution_stage_legs_reduced_height * seconds_per_leg_reduced_height
+      )
+      * 1.3
+    )
 
     # -- add PicoGreen working solution, then samples/standards ---------------
     # Added *before* the smaller-volume sample/standard transfer below --
@@ -426,29 +513,6 @@ async def main() -> None:
     # partial one did.
     picogreen_tier = tier_for_volume(picogreen_volume)
     await lh.pick_up_tips(fresh_tip_spots(picogreen_tier, ROWS))
-
-    # Real STARBackend.aspirate()/dispense() kwargs -- minimum_traverse_
-    # height_at_beginning_of_a_command (how high to rise before moving in
-    # X/Y) and min_z_endpos (how high to retract to afterward). Both
-    # default, on real hardware, to a conservative global "clear the whole
-    # deck" height (STARBackend's own default is 245mm); this loop never
-    # needs that much clearance, since the reservoir every aspirate here
-    # draws from never moves and the assay plate every dispense lands on is
-    # a single flat labware -- each only needs to clear its *own* rim, not
-    # the whole deck. Grounded in this run's actual resources, not guessed:
-    # each resource's own real top surface plus a small clearance margin.
-    # A demo-only quirk: LiquidHandlerChatterboxBackend has no motion model
-    # to begin with (it just prints a table row -- see chatterbox.py), so
-    # this has no effect on how long the *backend* call takes here or on a
-    # real robot's *pipetting* time either; it's genuinely a real-hardware
-    # optimization for the seconds a physical arm would otherwise spend
-    # traveling to and from a needlessly high safe height between transfers.
-    # The visualizer *does* render it, though -- see events.py's
-    # channel_ops_event() and frontend/main.js's animateChannelOp() for the
-    # rest of this path.
-    TRAVERSE_CLEARANCE_MM = 5.0
-    reservoir_traverse_height = res.picogreen_reservoir.get_absolute_location(z="top").z + TRAVERSE_CLEARANCE_MM
-    assay_plate_traverse_height = res.assay_plate.get_absolute_location(z="top").z + TRAVERSE_CLEARANCE_MM
 
     for col, rows in transfer_groups:
       n = len(rows)
@@ -479,8 +543,18 @@ async def main() -> None:
       source_wells = res.sample_plate[f"{rows[0]}{col}:{rows[-1]}{col}"]
       dest_wells = res.assay_plate[f"{rows[0]}{col}:{rows[-1]}{col}"]
       await lh.pick_up_tips(fresh_tip_spots(sample_tier, rows))
-      await lh.aspirate(source_wells, vols=[sample_volume] * n)
-      await lh.dispense(dest_wells, vols=[sample_volume] * n)
+      await lh.aspirate(
+        source_wells,
+        vols=[sample_volume] * n,
+        minimum_traverse_height_at_beginning_of_a_command=sample_plate_traverse_height,
+        min_z_endpos=sample_plate_traverse_height,
+      )
+      await lh.dispense(
+        dest_wells,
+        vols=[sample_volume] * n,
+        minimum_traverse_height_at_beginning_of_a_command=assay_plate_traverse_height,
+        min_z_endpos=assay_plate_traverse_height,
+      )
       await lh.discard_tips()
       await asyncio.sleep(0.3)
 
