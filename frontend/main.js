@@ -913,9 +913,12 @@ class Channel {
   // whatever this leg actually starts from on that axis" -- used for the
   // rise-to-safe-height leg (x/y must not move horizontally) and for
   // nudge_channel ops that only change one of x/y (see handleOpEvent's
-  // "nudge_channel" case). `target.z` may instead be a function
-  // (`() => number`) -- used for the descend/hold legs' tip-length-aware
-  // depth (see animateChannelOp). None of these can just be resolved to a value
+  // "nudge_channel" case). `target.z` may instead be a function -- either
+  // `() => number` (the descend/hold legs' tip-length-aware depth -- see
+  // animateChannelOp()) or `(from) => number` (a rise/retract leg's
+  // traverse-height target, which needs to know where *this* leg is
+  // actually starting from -- see traverseLegZ()'s docstring for why).
+  // None of these can just be resolved to a value
   // at enqueue time: since ops routinely arrive faster than their ~1.6s
   // animation plays out, the queue backs up, and a value captured now can
   // be stale by the time this leg actually starts -- e.g. still the
@@ -944,7 +947,12 @@ class Channel {
         if (this.current.target.x === null) this.current.target.x = this.current.from.x;
         if (this.current.target.y === null) this.current.target.y = this.current.from.y;
         if (this.current.target.z === null) this.current.target.z = this.current.from.z;
-        if (typeof this.current.target.z === "function") this.current.target.z = this.current.target.z();
+        // Passed `this.current.from` -- see traverseLegZ()'s docstring for
+        // why a rise leg's target needs to know where this leg is actually
+        // starting from, not just resolve to a value at enqueue time.
+        if (typeof this.current.target.z === "function") {
+          this.current.target.z = this.current.target.z(this.current.from);
+        }
         // Resolved after target.z above, not before -- a duration function
         // can use the now-numeric target/from to compute its own span.
         if (typeof this.current.duration === "function") {
@@ -1048,11 +1056,29 @@ const scaled = (ms) => ms * durationScale;
 // always takes its fixed nominal duration (see docs/PLAN.md's "Review
 // round 26") -- simpler, and there's no computation left that could ever
 // disagree between channels.
+// `(from) => number`, not `() => number`: a resource-specific traverse
+// height only ever accounts for clearing *that* resource's own rim --
+// it says nothing about whatever the channel might currently be sitting
+// over (a different, possibly taller, resource or carrier from a *previous*
+// op). The rise leg this feeds runs *before* X/Y move (see
+// animateChannelOp()'s leg order), so if its target were allowed to sit
+// below the channel's actual current height, the channel would drop in Z
+// first, still at the *old* X/Y, then translate horizontally at that now-
+// too-low height -- clipping straight through whatever's actually at the
+// old position (a carrier wall, an adjacent tube) before ever reaching
+// the new one. Clamping against `from.z` (the incoming leg's own starting
+// height, resolved fresh every time -- see enqueue()'s docstring) means
+// this leg only ever *rises or holds level* before translating, never
+// dips first; all the real descending happens in the dedicated descend
+// leg, once X/Y are already correct (confirmed live -- see docs/PLAN.md's
+// "Review round 27" for the "clips the carrier after pick_up_tips" bug
+// this fixes).
 function traverseLegZ(tipHeightMm, refZ, tipLengthFn) {
   if (tipHeightMm == null) return restZ;
-  return () => {
+  return (from) => {
     const tipLength = tipLengthFn();
-    return Math.min(restZ, Math.max(refZ + tipLength, tipHeightMm + tipLength));
+    const currentZ = from ? from.z : 0;
+    return Math.min(restZ, Math.max(refZ + tipLength, tipHeightMm + tipLength, currentZ));
   };
 }
 
@@ -1287,12 +1313,21 @@ function planGantryPasses(entries) {
 // still adjust *where* it travels, same reasoning as animateChannelOp()'s
 // riseZ/retractZ; unlike that function, there's no "this op's own working
 // depth" floor to clamp against here (an idle channel isn't descending
-// anywhere this pass), so it only ever clamps against the restZ ceiling.
+// anywhere this pass), so it only ever clamps against the restZ ceiling
+// and -- same reason as traverseLegZ()'s own `from` clamp -- against
+// wherever this leg is actually starting from, so an idle channel dragged
+// along at a reduced height never dips down before its own X/Y move either.
 function nudgeChannel(channelIndex, x, y, { traverseHeightMm, endHeightMm } = {}) {
   const ch = channels[channelIndex];
   if (!ch) return;
-  const riseZ = traverseHeightMm != null ? () => Math.min(restZ, traverseHeightMm + ch.tipLength) : restZ;
-  const retractZ = endHeightMm != null ? () => Math.min(restZ, endHeightMm + ch.tipLength) : restZ;
+  const riseZ =
+    traverseHeightMm != null
+      ? (from) => Math.min(restZ, Math.max(traverseHeightMm + ch.tipLength, from ? from.z : 0))
+      : restZ;
+  const retractZ =
+    endHeightMm != null
+      ? (from) => Math.min(restZ, Math.max(endHeightMm + ch.tipLength, from ? from.z : 0))
+      : restZ;
 
   ch.enqueue({ x: null, y: null, z: riseZ }, scaled(RISE_MS));
   ch.enqueue({ x, y: null, z: riseZ }, scaled(X_MOVE_MS));

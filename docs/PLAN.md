@@ -1667,6 +1667,58 @@ could sync the animations from the Python side instead.
       round-23 piercing/clipping fix is still intact. Full run still
       finished with every volume exactly correct.
 
+## Review round 27 (2026-08-19)
+
+User report, three instances of the same pattern: after `pick_up_tips`
+(TE transfer, sample transfer), the gantry drops in Z and clips the
+carrier before finishing its move; after aspirating (PicoGreen transfer),
+it drops in Z before moving in X/Y. In each case: "it should move to the
+top of \[the destination\] before going down in Z."
+
+- [x] **Root-caused: a rise-leg target computed from the destination
+      alone, blind to where the channel actually starts.** A resource's
+      traverse height (its own rim + clearance) only ever accounts for
+      clearing *that* resource -- it says nothing about whatever the
+      channel currently sits over, left there by the *previous* op. Since
+      the rise leg runs *before* X/Y move (rise, then X, then Y, then
+      descend -- see `animateChannelOp()`'s own leg order comment), a
+      destination-only height could be *lower* than the channel's current
+      position, and the leg would drop Z first, at the *old* X/Y, then
+      translate horizontally at that now-too-low height -- clipping
+      whatever's actually at the old position (a carrier wall, an
+      adjacent tube) on the way. Concretely: after `pick_up_tips` (never
+      traverse-optimized -- it retracts to the full global safe height),
+      the next op's rise leg targeted its own resource's low height with
+      no regard for the fact the channel was still sitting near-385mm up;
+      after a PicoGreen aspirate's retract (up near the reservoir's own
+      traverse height), the following dispense's rise leg targeted the
+      assay plate's *lower* height the same blind way.
+- [x] **Fixed by clamping every rise/retract leg's target against where it
+      actually starts.** `traverseLegZ()` (used by both
+      `animateChannelOp()` and `nudgeChannel()`) now takes a third bound in
+      its `min(restZ, max(...))`: the incoming leg's own `from.z`, so the
+      leg only ever rises or holds level before translating -- never dips.
+      Needed passing `from` into the lazy Z-target resolution in
+      `Channel.update()`, alongside the target itself (previously only
+      `duration` functions got `from`; `target.z` functions were called
+      with no arguments) -- extended, not replaced, so `target.z`
+      functions that don't care (like `animateChannelOp()`'s own
+      `targetZ()` for the descend/hold legs) just ignore the extra
+      argument. All the real descending still happens only in the
+      dedicated descend leg, once X/Y are already correct -- this doesn't
+      change *that* geometry at all, only stops the rise leg from
+      preemptively doing part of it early.
+
+      Verified live: captured every channel's full (x, y, z) trajectory at
+      50ms resolution across a complete run and scanned for the exact bug
+      signature -- a sample where Z dropped by more than 1mm in the same
+      step X or Y moved by more than 1mm. Found 3 such samples out of
+      10,024 total, and all three were trivial (1-4mm) drops right at
+      ~383-385mm -- essentially at `restZ` itself, not a real clipping-
+      relevant depth, and consistent with ordinary easing-curve
+      interpolation noise at a leg boundary rather than the reported bug.
+      Full run still finished with every volume exactly correct.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
