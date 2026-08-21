@@ -96,15 +96,24 @@ examples/picogreen_demo.py         PicoGreen dsDNA quantitation demo: an 8-point
                                     and PicoGreen-reagent transfers into an assay plate --
                                     exercises a reservoir, Eppendorf tubes, and a second
                                     plate type alongside the usual carriers/tip racks
-examples/pixel_art_demo.py         pixel-art demo: 5 x 96-well Corning plates on one plate
-                                    carrier, each painting one letter of "ROCHE" in portrait
-                                    orientation via a real Hamilton multi-dispense pattern
-                                    (aspirate 300uL once, dispense 30uL up to 10 times,
-                                    returning each channel's exact leftover to the shared
-                                    reservoir with empty=True instead of discarding tips)
+examples/pixel_art_demo.py         pixel-art demo: prints any 5-character word (A-Z0-9,
+                                    entered in the HUD) across 5 x 96-well Corning plates in
+                                    portrait orientation via a real Hamilton multi-dispense
+                                    pattern (aspirate 300uL once, dispense back out in several
+                                    equal steps, returning each channel's exact leftover to
+                                    the shared reservoir with empty=True instead of discarding
+                                    tips) -- all 36 characters' bitmaps are pre-generated, not
+                                    drawn at runtime
 examples/custom_labware.py         a real custom Plate definition (a Cellvis 384-well
                                     glass-bottom plate) not yet in PyLabRobot's own catalog,
                                     built the same way its own catalog entries are
+examples/normalization_demo.py     normalization-protocol demo: dilutes a 96-well plate's
+                                    samples (read from a CSV) to one target concentration and
+                                    final volume (both HUD inputs) -- the actual decision
+                                    logic (how much sample/diluent, in what order, or whether
+                                    to flag/skip a well) lives in
+                                    src/hamilton_visualizer/normalization.py, a small
+                                    PyLabRobot-free module unit-tested in tests/
 ```
 
 ## Development
@@ -114,5 +123,13 @@ uv run python examples/demo_protocol.py
 ```
 
 Open the browser console and inspect `window.__viz` (scene/camera/gantry
-objects) or `window.__lastStateMessages` (captured tip/volume state events)
-for debugging.
+objects, plus `.channels` for the gantry's own animation state) or
+`window.__lastStateMessages` (captured tip/volume state events) for
+debugging.
+
+Unit tests (currently just `src/hamilton_visualizer/normalization.py`'s
+pure decision logic -- no PyLabRobot/browser involved):
+
+```bash
+uv run pytest
+```

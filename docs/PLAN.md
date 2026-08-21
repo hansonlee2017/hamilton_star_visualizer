@@ -1968,6 +1968,173 @@ the PicoGreen-specific run-params HUD showing up for every demo.
       HUD row at all -- just the status pill and buttons -- and still runs
       end to end with an empty params dict and no errors.
 
+## Review round 32 (2026-08-20)
+
+User request: generalize `pixel_art_demo.py` from a fixed "ROCHE" to any
+5-character word (A-Z0-9), pre-generating all 36 characters' bitmaps
+rather than drawing them at runtime, entered via the HUD, with a
+30-150uL HUD-configurable dispense volume. Four decisions asked up front:
+bitmap source (font-rasterized via Pillow, regenerating all 36 including
+the existing R/O/C/H/E for one consistent style -- chosen over hand-
+drawing), HUD widget (one 5-character text box -- chosen over 5 separate
+boxes), validation (strict: block Start until exactly 5 valid characters
+-- chosen over silently padding/truncating), and blank support (no --
+chosen over allowing fewer than 5 real characters).
+
+- [x] **36-character bitmap library, generated offline, not at runtime.**
+      A one-off script (not committed -- run via `uv run --with pillow`,
+      Pillow is not a runtime dependency) rasterized Arial Bold into each
+      12x8 grid via block-averaged downsampling, then the literal output
+      was pasted into `pixel_art_demo.py`'s `PATTERNS` dict -- `main()`
+      never draws anything, only ever does a dict lookup, which is what
+      actually makes 5-character *arbitrary* input practical.
+- [x] **A new `"text"` field type for `VisualizerServer.set_run_params()`**
+      (the HUD mechanism round 31 built) -- `frontend/main.js`'s
+      `renderRunParams()` gained a branch that sanitizes input to
+      uppercase `A-Z0-9` and truncates to a declared `length` as you type,
+      plus `runParamsValid()`/`refreshStartButton()` to keep "Start
+      Protocol" disabled while any text field is short of that length
+      (wired into every place that used to set `startBtn.disabled`
+      directly: `onopen`/`onclose`/the `"start_status"`/`"reset"`
+      handlers). `index.html` gained matching `:invalid`-styling CSS (via
+      `minLength`/`required` on the generated input, purely for that
+      styling hook -- the JS validation logic doesn't rely on the
+      browser's own constraint-validation state at all).
+- [x] **Backend generalized to read `word`/`dispense_volume_ul` from the
+      HUD** instead of the old fixed `WORD = "ROCHE"`/`DISPENSE_VOLUME_UL
+      = 30.0` constants -- `_clamped_word()` (new, mirrors
+      `_clamped_param()`'s "never trust a websocket value" philosophy)
+      sanitizes and pads/truncates any input that somehow reaches the
+      backend invalid despite the HUD's own gate. `DISPENSES_PER_ASPIRATE
+      = 300 // dispense_volume_ul` computed at runtime; the existing
+      leftover-return math already generalized to any dispense volume with
+      no further changes (confirmed: `ASPIRATE_VOLUME_UL - dispense_count
+      * dispense_volume_ul` never assumed the division was exact). Plates
+      renamed by position (`plate_0`..`plate_4`), not by character, since
+      a word can now repeat one (e.g. "HELLO").
+- [x] **Bug: the reservoir's residual margin was sized for the wrong
+      thing (found via hand math before it could fail live, fixed).**
+      `RESIDUAL_INK_UL` was still 500uL, sized for "leftover once the run
+      finishes" -- but every aspirate cycle draws the *full* 8 x 300uL =
+      2,400uL from the reservoir instantly, before that cycle's leftover
+      is returned a few dispenses later, so the pre-fill has to cover that
+      single largest in-flight draw, not just the run's total net
+      delivery. Raised to 2,500uL.
+
+      Verified live: `HIGH1` at 75uL/well completed with zero backend
+      errors, and a full `resourceIndex` sweep of all 5 plates matched the
+      bitmaps exactly, with the reservoir settling at exactly the
+      predicted 2,500uL residual -- this run's own dynamically-computed
+      pre-fill minus its real delivered total, exactly, not merely close.
+- [x] **Investigated a live gantry-desync report, found a genuine one-time
+      freeze, could not reproduce it.** User reported "the pipettes are
+      de-sync" mid-run; confirmed aspirate already happens as a single
+      synchronized 8-channel pass (all `offset.x == 0`, so
+      `planGantryPasses()` groups them into one pass, not eight sequential
+      ones) -- that part of the design was already correct. Did catch one
+      channel frozen mid-air at a non-rest height for 5+ continuous
+      seconds with the backend already finished and the render loop
+      confirmed still alive (`requestAnimationFrame` kept firing) -- but a
+      clean, heavily-instrumented rerun of the identical word/volume
+      (per-channel queue-length sampled every 250ms, explicit stall
+      detection for any channel frozen >=3s at a non-zero queue) completed
+      with zero stalls and fully correct final state. Folded the
+      temporary `window.__channels` debug hook used for this into a
+      permanent `window.__viz.channels` getter (a live getter, not a
+      plain reference -- `ensureChannels()` *reassigns* the module-level
+      `channels` array, not just mutates it) instead of leaving an ad-hoc
+      global behind.
+
+## Review round 33 (2026-08-20)
+
+User request: a normalization-protocol demo -- read a 96-well plate's
+current concentrations/volumes from a CSV, dilute every sample to one
+target concentration in one final volume (50-200uL, both HUD inputs), with
+three explicit rules: (1) flag "too dilute" wells that can't reach target,
+(2) treat 5uL as the minimum pipettable volume, flagging/skipping
+too-concentrated samples and skipping (not flagging the whole well for)
+negligible diluent top-ups, (3) transfer whichever of sample/diluent is
+larger first. Explicitly asked for a plan and clarifying questions before
+any code, and for unit tests proving the logic. Four structural decisions
+were asked up front (fresh destination plate; fresh tip per sample +
+shared tips for diluent; 8-channel batching where possible; pytest) and
+five more in a follow-up (sample_name CSV column; HUD for target/volume;
+splitting "too dilute" into two distinct flags; 0.1uL rounding; a results
+CSV including flags).
+
+- [x] **`src/hamilton_visualizer/normalization.py`, a small PyLabRobot-free
+      logic module.** `compute_normalization()` takes one well's
+      `(concentration, volume)` plus the run's `(target_concentration,
+      final_volume_ul)` and returns a `NormalizationResult` -- the exact
+      sample/diluent volumes to transfer (rounded to 0.1uL), the transfer
+      order, and a flag. Rule 1 splits into two distinct flags per the
+      user's follow-up: `TOO_DILUTE_CONCENTRATION` (concentration itself
+      is below target -- no achievable volume could ever work) vs
+      `INSUFFICIENT_SAMPLE_VOLUME` (concentration would work, but this
+      well doesn't hold enough of it) -- both skip the well entirely. Rule
+      2 also splits: `TOO_CONCENTRATED` (sample volume needed rounds under
+      5uL) skips the well entirely, while `DILUENT_SKIPPED` (diluent
+      volume needed rounds under 5uL) only skips *that* leg -- the sample
+      still transfers alone. Also holds `load_samples_csv()`/
+      `write_results_csv()` -- plain stdlib `csv`, no PyLabRobot, just as
+      unit-testable as the math.
+- [x] **`tests/test_normalization.py`, 24 pytest cases** (added `pytest`
+      as a `[dependency-groups] dev` dependency -- not previously in
+      pyproject.toml, no `tests/` directory existed before this): every
+      rule's ordinary case, its exact boundary (concentration/volume/
+      pipette-volume values right at the threshold, confirming which side
+      of `<` vs `<=` each check actually falls on), both `TOO_DILUTE_
+      CONCENTRATION` edge cases (zero and negative concentration, guarding
+      the division), all three transfer-order outcomes, rounding
+      (confirming diluent is computed from the *rounded* sample volume so
+      the two always sum to the final volume instead of drifting from
+      independently-rounded numbers), and CSV round-trip/missing-column
+      cases.
+- [x] **`examples/normalization_demo.py`** -- reads
+      `examples/normalization_samples.csv` (a fresh synthetic 96-well
+      example, deterministically seeded to guarantee every flag path
+      appears -- verified live: 64 ok / 9 insufficient_sample_volume / 8
+      too_dilute_concentration / 8 too_concentrated / 7 diluent_skipped),
+      pre-fills a source plate from it before "Start Protocol" (doesn't
+      depend on the HUD's target/volume), and after the click computes
+      every well's `NormalizationResult`, pre-fills the diluent reservoir
+      dynamically from the *actual* total diluent this specific run needs
+      (impossible to hardcode now that both HUD params vary), writes
+      `examples/normalization_results.csv` (every well's computed volumes
+      and flag -- the audit trail, not just what got pipetted), then
+      executes the transfers: skipped wells untouched, active wells
+      grouped by `transfer_order` and batched 8 channels at a time with
+      per-channel volumes (PyLabRobot's `vols=[...]` already supports a
+      different volume per channel in one call).
+- [x] **Bug: two tip types can't both be mounted on the same channels at
+      once (found live, fixed).** The original design picked up one
+      shared set of diluent tips meant to stay mounted for the whole run,
+      interleaving diluent/sample batches on the same 8 channels -- the
+      very first sample batch's `pick_up_tips()` (defaulting to channels
+      0-7, same as the diluent tips already sitting there) raised
+      PyLabRobot's own `HasTipError: Channel has tip`, since a real
+      8-channel head can only hold one tip per channel. Fixed by splitting
+      into three phases instead of interleaving: phase A does every
+      diluent-first well's diluent step (one shared pick-up), phase B does
+      *every* well's sample step (fresh tips per batch, as always), phase
+      C does every sample-first well's diluent step (a second shared
+      pick-up, from a different tip-rack column than phase A). Each well's
+      own two-liquid order is still preserved -- what rule 3 cares about
+      is which liquid lands in *that well* first, not which tip-rack
+      column supplied it -- confirmed live: the fixed version completed
+      the full 96-well run one tip-collision-free.
+
+      Verified live end-to-end: zero backend errors, and a full
+      `resourceIndex` sweep of all 96 wells' destination *and* source
+      plate volumes against `normalization_results.csv` found zero
+      discrepancies (every active well's destination matched
+      `sample_volume_ul + diluent_volume_ul` exactly, every active well's
+      source matched `original_volume - sample_volume_ul` exactly, every
+      skipped well's source stayed exactly unchanged). The diluent
+      reservoir settled at exactly the hand-computed 2,000uL margin --
+      this run's own dynamically-computed prefill (4,660.3uL real need +
+      2,000uL margin) minus that same 4,660.3uL once actually delivered.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
