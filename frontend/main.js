@@ -169,11 +169,36 @@ const runParamsEl = document.getElementById("run-params");
 let runParamFields = [];
 const runParamInputs = new Map();
 
+// Tracked separately from the DOM so refreshStartButton() can OR them with
+// text-field validity below without re-deriving "are we connected"/"has
+// this run already started" from scratch each time.
+let wsConnected = false;
+let protocolStarted = false;
+
+// A "text" field (see server.py's set_run_params() docstring) with a
+// declared `length` blocks "Start Protocol" until its current value is
+// exactly that long -- unlike a "number" field, which always clamps to
+// something valid, a too-short word has no sensible default to silently
+// fall back to mid-edit.
+function runParamsValid() {
+  for (const field of runParamFields) {
+    if (field.type !== "text" || field.length == null) continue;
+    const input = runParamInputs.get(field.id);
+    if (!input || input.value.length !== field.length) return false;
+  }
+  return true;
+}
+
+function refreshStartButton() {
+  startBtn.disabled = !wsConnected || protocolStarted || !runParamsValid();
+}
+
 // Builds the HUD's run-params row generically from the server-declared
 // field list -- see server.py's set_run_params() docstring for the exact
-// schema. Two field types: "number" (an editable input, its value read
-// back into the params dict when "Start Protocol" is clicked) and
-// "computed" (a read-only derived readout; currently only
+// schema. Three field types: "number" (an editable input), "text" (an
+// editable input restricted to uppercase A-Z0-9, sanitized as you type,
+// gating the Start button via runParamsValid() above while too short),
+// and "computed" (a read-only derived readout; currently only
 // "picogreen_working_solution", what picogreen_demo.py's "PicoGreen 195uL"
 // readout uses -- an unrecognized `basis` is simply not rendered, so this
 // can grow new computed kinds without breaking older ones). A "computed"
@@ -200,6 +225,35 @@ function renderRunParams(fields) {
       if (field.suffix) label.appendChild(document.createTextNode(field.suffix));
       runParamsEl.appendChild(label);
       runParamInputs.set(field.id, input);
+    } else if (field.type === "text") {
+      const label = document.createElement("label");
+      if (field.title) label.title = field.title;
+      label.appendChild(document.createTextNode(field.label ?? field.id));
+      const input = document.createElement("input");
+      input.type = "text";
+      if (field.length != null) {
+        input.maxLength = field.length;
+        // Native constraint-validation attributes -- purely for the
+        // #run-params input[type="text"]:invalid CSS (index.html) to have
+        // something real to key off; refreshStartButton()/runParamsValid()
+        // above don't rely on the browser's own validity state at all.
+        input.minLength = field.length;
+        input.required = true;
+      }
+      input.value = String(field.default ?? "")
+        .toUpperCase()
+        .slice(0, field.length);
+      input.addEventListener("input", () => {
+        const clean = input.value
+          .toUpperCase()
+          .replace(/[^A-Z0-9]/g, "")
+          .slice(0, field.length ?? input.value.length);
+        if (clean !== input.value) input.value = clean;
+        refreshStartButton();
+      });
+      label.appendChild(input);
+      runParamsEl.appendChild(label);
+      runParamInputs.set(field.id, input);
     } else if (field.type === "computed") {
       const span = document.createElement("span");
       span.className = "readout";
@@ -216,6 +270,7 @@ function renderRunParams(fields) {
       update();
     }
   }
+  refreshStartButton();
 }
 
 replayBtn.addEventListener("click", () => {
@@ -239,21 +294,27 @@ function lockForRun() {
 
 startBtn.addEventListener("click", () => {
   if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
-  // Clamp client-side to each field's declared min/max/default (see
-  // server.py's set_run_params() docstring); the server also ignores a
-  // second "start_protocol" once one's been accepted, so a stale/hand-
-  // crafted message here can't change an already-running protocol's
-  // params either way.
+  // Button is disabled (see refreshStartButton()) whenever a "text" field
+  // is still short of its declared length, so by the time a click can
+  // reach here every text field is already exactly the right length --
+  // this loop only still needs to *clamp* "number" fields (a number field
+  // is never invalid, just possibly out of range) and pass "text" fields
+  // through as-is. The server also ignores a second "start_protocol" once
+  // one's been accepted, so a stale/hand-crafted message here can't change
+  // an already-running protocol's params either way.
   const params = {};
   for (const field of runParamFields) {
-    if (field.type !== "number") continue;
     const input = runParamInputs.get(field.id);
     if (!input) continue;
-    const raw = Number(input.value);
-    let value = Number.isFinite(raw) ? raw : field.default ?? field.min ?? 0;
-    if (field.min != null) value = Math.max(field.min, value);
-    if (field.max != null) value = Math.min(field.max, value);
-    params[field.id] = Math.round(value);
+    if (field.type === "number") {
+      const raw = Number(input.value);
+      let value = Number.isFinite(raw) ? raw : field.default ?? field.min ?? 0;
+      if (field.min != null) value = Math.max(field.min, value);
+      if (field.max != null) value = Math.min(field.max, value);
+      params[field.id] = Math.round(value);
+    } else if (field.type === "text") {
+      params[field.id] = input.value;
+    }
   }
   currentWs.send(JSON.stringify({ action: "start_protocol", params }));
   // Optimistically reflect it immediately; the server's own
@@ -1497,8 +1558,10 @@ function connect() {
     // settled a moment later by the "start_status"/"run_status" the server
     // sends every new connection -- this just makes sure a *reconnect*
     // doesn't leave things stuck disabled from the previous connection's
-    // onclose.
-    startBtn.disabled = false;
+    // onclose. refreshStartButton() also folds in current run-params
+    // validity (see its docstring) rather than unconditionally enabling.
+    wsConnected = true;
+    refreshStartButton();
     resetBtn.disabled = true;
   };
   ws.onclose = () => {
@@ -1507,7 +1570,8 @@ function connect() {
     statusEl.className = "disconnected";
     statusTextEl.textContent = "disconnected -- retrying...";
     replayBtn.disabled = true;
-    startBtn.disabled = true;
+    wsConnected = false;
+    refreshStartButton();
     resetBtn.disabled = true;
     setTimeout(connect, 1500);
   };
@@ -1527,7 +1591,8 @@ function connect() {
     } else if (msg.type === "op") {
       handleOpEvent(msg);
     } else if (msg.type === "start_status") {
-      startBtn.disabled = msg.started;
+      protocolStarted = msg.started;
+      refreshStartButton();
       startBtn.classList.toggle("started", msg.started);
       if (msg.started) {
         lockForRun();
@@ -1546,7 +1611,8 @@ function connect() {
       // message (once the new run's lh.setup() fires) rebuilds the 3D
       // scene itself; this just resets the controls and log around it.
       for (const input of runParamInputs.values()) input.disabled = false;
-      startBtn.disabled = false;
+      protocolStarted = false;
+      refreshStartButton();
       startBtn.classList.remove("started");
       resetBtn.disabled = true;
       resetBtn.classList.remove("visible");
@@ -1627,4 +1693,20 @@ onResize();
 requestAnimationFrame(animate);
 
 // Debug hook -- inspect from the browser console with `window.__viz`.
-window.__viz = { scene, camera, sceneRoot, gantryGroup, resourceIndex, controls, container, frustumHalfHeight: () => frustumHalfHeight };
+// `channels` is a getter, not a plain reference, since ensureChannels()
+// *reassigns* the module-level `channels` array (not just mutates it) --
+// see docs/PLAN.md's "Review round 32" for the gantry-desync
+// investigation this was added for.
+window.__viz = {
+  scene,
+  camera,
+  sceneRoot,
+  gantryGroup,
+  resourceIndex,
+  controls,
+  container,
+  frustumHalfHeight: () => frustumHalfHeight,
+  get channels() {
+    return channels;
+  },
+};

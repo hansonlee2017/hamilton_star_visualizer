@@ -278,15 +278,28 @@ class VisualizerServer:
     after :meth:`start`, alongside :meth:`set_scene`). ``fields`` is a list
     of plain dicts the frontend renders generically -- see
     ``frontend/main.js``'s ``renderRunParams()`` for the exact schema, but
-    in short: ``{"type": "number", "id", "label", "min", "max", "step",
-    "default", "suffix"}`` for an editable input (its current value is
-    read back into :meth:`wait_for_start`'s returned params dict, keyed by
-    ``id``, when "Start Protocol" is clicked), or ``{"type": "computed",
-    "basis": ..., ...}`` for a derived, read-only readout the frontend
-    knows how to compute (currently just ``"picogreen_working_solution"``,
-    what ``picogreen_demo.py`` uses for its "PicoGreen 195uL" readout) --
-    unrecognized ``basis`` values are simply not rendered, so this can grow
-    new computed kinds without breaking older ones.
+    in short, three field types:
+
+    - ``{"type": "number", "id", "label", "min", "max", "step", "default",
+      "suffix"}``: an editable numeric input.
+    - ``{"type": "text", "id", "label", "length", "default"}``: an
+      editable text input, restricted client-side to uppercase ``A-Z0-9``
+      and truncated to exactly ``length`` characters as you type (see
+      ``pixel_art_demo.py``'s "word" field). "Start Protocol" stays
+      disabled while any text field's current value is shorter than its
+      declared ``length`` -- there's no partial/padded fallback the way
+      numeric fields clamp out-of-range values, since a too-short *word*
+      has no sensible default to fall back to mid-edit.
+    - ``{"type": "computed", "basis": ..., ...}``: a derived, read-only
+      readout the frontend knows how to compute (currently just
+      ``"picogreen_working_solution"``, what ``picogreen_demo.py`` uses for
+      its "PicoGreen 195uL" readout).
+
+    Both "number" and "text" fields' current values are read back into
+    :meth:`wait_for_start`'s returned params dict, keyed by ``id``, when
+    "Start Protocol" is clicked. An unrecognized ``basis`` on a "computed"
+    field is simply not rendered, so this can grow new computed kinds
+    without breaking older ones.
 
     This intentionally isn't a general form/formula system: it's exactly
     general enough to describe the one demo (picogreen_demo.py) that has
