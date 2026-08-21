@@ -1099,26 +1099,12 @@ class Channel {
 }
 
 let channels = [];
-// Which channels currently have a tip on, updated *eagerly* -- the instant
-// a pick_up_tips/drop_tips op event is processed (see handleOpEvent()) --
-// not from Channel.hasTip, which only flips at that op's own onArrive
-// (i.e. whenever its animation actually finishes playing, routinely well
-// after this event was received: events arrive faster than their ~1.6s
-// animation plays out, same as everywhere else in this file). planGantry
-// Passes() needs to know "is this channel loaded" *right now*, at planning
-// time, to decide whether to drag it along -- reading the animation-timed
-// flag instead undercounts loaded channels for every op processed before
-// an earlier pick_up_tips's animation has caught up, silently dropping
-// nudges (confirmed live: a channel's total enqueued legs came up short
-// exactly this way before this eager Set was added).
-const loadedChannelsEager = new Set();
 function ensureChannels(numChannels) {
   // Always rebuilt (not just when the count changes) so a fresh "scene"
   // message -- including the one that kicks off a replay -- also resets
   // the gantry back to its rest pose, not just the deck/plates/tips.
   for (const ch of channels) gantryGroup.remove(ch.group);
   channels = Array.from({ length: numChannels }, (_, i) => new Channel(i));
-  loadedChannelsEager.clear();
 }
 
 const RISE_MS = 350;
@@ -1347,15 +1333,30 @@ function resolveChannelYs(channelIndices, fixedY, preferredY, pitchMm) {
 function planGantryPasses(entries) {
   const targetedChannels = entries.map((e) => e.channel).sort((a, b) => a - b);
   const byChannel = new Map(entries.map((e) => [e.channel, e]));
-  // Every *other* currently tip-loaded channel is dragged along too, even
-  // though this call gives it no target of its own -- a real Hamilton's 8
-  // channels share one arm, so a channel that picked up a tip earlier
-  // physically cannot stay parked while a single-channel call (e.g. one
-  // channel alone doing a serial dilution) moves the arm somewhere else.
-  // `loadedChannelsEager`, not `channels[i].hasTip` -- see that Set's own
-  // comment for why the animation-timed flag isn't safe to read here.
-  const loadedChannels = [...loadedChannelsEager];
-  const channelIndices = [...new Set([...targetedChannels, ...loadedChannels])].sort(
+  // Every *other* channel is dragged along too, tip or no tip -- a real
+  // Hamilton's 8 channels share one arm, so a channel physically cannot
+  // stay parked while a call that only targets *some* channels (a
+  // single-channel serial dilution, or any multi-channel call with fewer
+  // than 8 active entries) moves the arm somewhere else, regardless of
+  // whether that channel happens to be carrying a tip right now.
+  //
+  // This used to be restricted to `loadedChannelsEager` (tip-carrying
+  // channels only) -- deliberately widened to *every* channel (confirmed
+  // live: a normalization-protocol run's un-targeted, tip-less channels
+  // fell badly behind the targeted ones in queued animation time, since
+  // they'd previously gotten nothing enqueued at all for calls that
+  // didn't target them, eventually catching up to and animating a
+  // *later* op -- picking up a tip from a different rack -- while the
+  // targeted channels were still working through an earlier one; see
+  // docs/PLAN.md's "Review round 34"). nudgeChannel()'s own total
+  // duration already equals animateChannelOp()'s (same six leg-durations,
+  // just the last three folded into one enqueue() call -- see that
+  // function), so dragging every channel along for every op keeps all of
+  // them accumulating identical total animation time regardless of which
+  // ones a given call actually targets -- true lockstep by construction,
+  // for any protocol, not just ones that happen to use every channel
+  // evenly.
+  const channelIndices = [...new Set([...targetedChannels, ...channels.keys()])].sort(
     (a, b) => a - b
   );
   // xs only ever comes from targeted channels -- a merely-dragged-along
@@ -1481,9 +1482,6 @@ function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor, traverseHe
 function handleOpEvent(msg) {
   switch (msg.op) {
     case "pick_up_tips":
-      // Eagerly, synchronously, right now -- see loadedChannelsEager's own
-      // comment for why this can't wait for setTip()'s onArrive below.
-      for (const entry of msg.channels) loadedChannelsEager.add(entry.channel);
       animateChannelGroupOp(
         msg.channels,
         (entry) => () => {
@@ -1495,7 +1493,6 @@ function handleOpEvent(msg) {
       logEvent("pick_up_tips", msg.channels.map((c) => `p${c.channel}:${c.resource}`).join(", "));
       break;
     case "drop_tips":
-      for (const entry of msg.channels) loadedChannelsEager.delete(entry.channel);
       animateChannelGroupOp(msg.channels, (entry) => () => {
         channels[entry.channel]?.setTip(false);
         applyEmbeddedResourceState(entry);

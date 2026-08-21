@@ -2135,6 +2135,67 @@ CSV including flags).
       this run's own dynamically-computed prefill (4,660.3uL real need +
       2,000uL margin) minus that same 4,660.3uL once actually delivered.
 
+## Review round 34 (2026-08-21)
+
+User report: watching the normalization demo live, "the channels desync
+after a while... it could be after finishing the first phase of diluent
+first, sample second" -- a specific, actionable hint pointing at the
+Phase A (diluent-first wells' diluent step) to Phase B (every well's
+sample step) boundary round 33 built.
+
+- [x] **Found and fixed the real root cause, in `frontend/main.js` itself,
+      not the demo script.** Reproduced live with full channel-state
+      instrumentation and caught it directly: right after Phase A,
+      channel 7 had already dropped its tip and sat idle at the trash
+      position (`hasTip: false`, empty queue) while channels 0-6 were
+      still deep in backlog, still holding tips (`hasTip: true`) --
+      visually exactly what the user described, "a channel picks up a tip
+      from a different tip box." Root cause: `planGantryPasses()` only
+      dragged *tip-loaded* channels along for an op they weren't targeted
+      by (`loadedChannelsEager`, added several rounds ago for a different
+      bug). A channel with no tip mounted for a given call got nothing
+      enqueued at all when that call didn't target it -- so a channel
+      used less often than others (systematically channel 7, the least-
+      favored index under PyLabRobot's default 0..n-1 channel assignment
+      whenever a batch is smaller than 8) accumulates a shorter queue over
+      the run, drains it in less real time, and reaches -- and starts
+      animating -- a *later* op (a different tip rack's pick-up) while
+      slower channels are still working through an earlier one. Confirmed
+      live: channel 0 had 555 total legs queued at the run's start,
+      channel 7 only 395.
+      User explicitly steered away from a demo-side fix ("I don't think
+      changing the logic in the normalization is a good idea. Because the
+      visualizer should be able to accept any valid but arbitrary
+      operations") -- correct: the bug wasn't specific to how this one
+      demo happens to batch channels, it's that the visualizer didn't
+      keep *any* protocol's channels in lockstep when channel usage isn't
+      perfectly even, which no protocol is obligated to be.
+- [x] **Fix: widened the "drag along" set from tip-loaded channels to
+      every channel, always.** `nudgeChannel()`'s total duration already
+      exactly equals `animateChannelOp()`'s (same six leg-durations, just
+      the last three folded into one `enqueue()` call) -- so once every
+      channel gets dragged along for every group op regardless of tip
+      status, every channel accumulates identical total animation time no
+      matter which ones a given call actually targets. True lockstep by
+      construction, for any channel-usage pattern, not just even ones.
+      `loadedChannelsEager` (now dead -- its only read site was the code
+      just replaced) removed entirely, including its own tracking in
+      `handleOpEvent()`'s pick_up_tips/drop_tips cases.
+
+      Verified live: reran the identical word/CSV/params with full
+      per-channel queue-length and tip-state instrumentation (400ms
+      samples across the whole ~500-sample run). The queue-length gap
+      between the busiest and idlest channel stayed *flat* at 32 legs for
+      the entire run (never widened), vs. the old run's initial 160-leg
+      gap that only grew from there. `hasTip` mismatches only ever
+      appeared transiently (a single 400ms frame, or exactly matching a
+      real 7-well tail batch correctly leaving one channel tip-less) --
+      never the sustained "one channel fully done, others still deep in
+      backlog" pattern the bug produced. Final state re-verified
+      identical to before the fix: zero discrepancies across all 96
+      wells' destination/source volumes against `normalization_results.csv`,
+      reservoir settled at the same exact 2,000uL.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
