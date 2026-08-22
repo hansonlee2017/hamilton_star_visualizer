@@ -1,11 +1,17 @@
 """CO-RE 96 head demo: pick up all 96 tips from a full rack at once, aspirate
 from every well of a source plate simultaneously, dispense into a fresh
-destination plate, then drop the tips back onto the rack.
+destination plate, then discard the tips into the deck's own 96-head trash
+(``STARDeck``'s ``trash_core96``, not back onto the rack).
 
 No individual 8-channel ops here -- this demo exists purely to exercise the
 96-head integration (``frontend/gantry.js``'s ``Core96Head``,
 ``VisualizerBackend.pick_up_tips96()``/``aspirate96()``/``dispense96()``/
-``drop_tips96()``) on its own. See ``cherry_pick_demo.py``/
+``drop_tips96()``) on its own. ``discard_tips96()`` is a thin wrapper
+around ``drop_tips96(deck.get_trash_area96())`` (see PyLabRobot's own
+``LiquidHandler.discard_tips96()``), so it exercises the exact same
+backend/frontend path as a drop onto a rack would -- just targeting
+``trash_core96`` instead of a ``TipRack``, which is also why no tip spots
+visually refill afterward (a ``Trash`` has none). See ``cherry_pick_demo.py``/
 ``picogreen_demo.py`` for the per-channel side; the two mechanisms are
 independent and coexist on the same deck (per design), just not both
 exercised by this one script.
@@ -101,8 +107,8 @@ async def main() -> None:
     print(f"Dispensing {TRANSFER_VOLUME_UL}uL into every well of the destination plate...")
     await lh.dispense96(dest_plate, volume=TRANSFER_VOLUME_UL)
 
-    print("Dropping tips back onto the rack...")
-    await lh.drop_tips96(tip_rack)
+    print("Discarding tips into the trash...")
+    await lh.discard_tips96()
 
     print("CO-RE 96 head demo finished.")
     await server.mark_finished()
