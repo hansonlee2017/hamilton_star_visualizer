@@ -2780,6 +2780,57 @@ too.
       end-to-end (`source_plate_well_A1.volume === 150`,
       `dest_plate_well_H12.volume === 50`) with a clean console throughout.
 
+      Fourth follow-up fix (same round, user-reported): "The plate lights
+      up instead of the wells during pipetting, also there is no
+      animation for aspiration and dispense like in the multichannel
+      pipettes." Both correct, and both straightforward omissions rather
+      than anything wrong in the sequencing/Z work above. The
+      aspirate96/dispense96 handler called `flashResource(msg.resource)`
+      -- `msg.resource` is the *plate*, since `resource_event()` computes
+      one top-level anchor point for the whole call the same way
+      `pick_up_tips96`/`drop_tips96` do (that part is correct for those
+      two -- there's genuinely one rack, not 96 spots, to anchor
+      *motion* to) -- while a single channel's own aspirate/dispense
+      flashes the one specific *well* it targeted
+      (`flashResource(entry.resource)`). Fixed by flashing each well in
+      `msg.wells` individually instead (the same array already used for
+      `applyEmbeddedResourceState()`, one more call alongside it) --
+      `msg.resource` no longer touched here at all. Separately,
+      `Channel.pulse()` (a brief white flash on the channel's own body)
+      and `Channel.flowPulse()` (a scrolling gradient texture on the
+      carried tip, simulating liquid moving through it) were never called
+      anywhere for the 96-head, since nothing in this round's earlier
+      work had added equivalents. Added `Core96Head.pulse()`
+      (identical to `Channel.pulse()`, reverting to `CORE96_EMPTY_COLOR`
+      instead of a channel body's own fixed grey) and
+      `Core96Head.flowPulse(direction)` -- applied to the *one* shared
+      `tipMaterial` all 96 cones already use (see the constructor's own
+      sharing comment), so animating it once visibly flows through all 96
+      simultaneously instead of needing 96 independent animations; own
+      cloned aspirate/dispense flow textures (mirroring `Channel`'s own
+      per-instance clones) so this doesn't fight over texture `.offset`
+      state with whichever `Channel` might be flow-pulsing at the same
+      moment. Neither is routed through the leg-motion `AnimationQueue` --
+      like `Channel`'s own versions, both are fire-and-forget decorative
+      overlays timed to when an op visually arrives, not additional legs
+      to sequence.
+
+      Verified live: since both effects are brief (a few hundred ms, even
+      scaled by the HUD's speed setting), a single screenshot proved
+      unreliable for catching them (screenshot latency alone exceeded the
+      window), so verified by densely polling the actual THREE.js material
+      state every 20ms across a full run instead: `core96Head.body.
+      material.color` was observed to actually reach pure white
+      (`sawPulse: true`), `core96Head.tipMaterial.map` was observed
+      non-null at some point (`sawFlowMap: true`, confirming the flow
+      texture really gets applied), a sampled well's own mesh color was
+      observed reaching pure white (`sawWellFlash: true`), and -- the
+      actual regression check -- the *plate's* own mesh color was
+      confirmed to *never* reach white across the whole run
+      (`sawPlateFlash: false`), directly disproving the original "plate
+      lights up" complaint under the fix. Both plates' volumes still
+      correct end-to-end afterward, clean console throughout.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

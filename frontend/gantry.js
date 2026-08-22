@@ -540,6 +540,16 @@ class Core96Head {
       }
     }
 
+    // Own clones (like a single Channel's own aspirateFlowTexture/
+    // dispenseFlowTexture -- see that class's own comment), not the
+    // shared module-level FLOW_TEXTURE_ASPIRATE/DISPENSE directly: a
+    // texture object's `.offset` is mutated in place while animating, and
+    // this head's own flowPulse() would otherwise fight over that same
+    // offset with whichever Channel happens to be flow-pulsing at the
+    // same moment.
+    this.aspirateFlowTexture = FLOW_TEXTURE_ASPIRATE.clone();
+    this.dispenseFlowTexture = FLOW_TEXTURE_DISPENSE.clone();
+
     gantryGroup.add(this.group);
     this.applyPosition();
   }
@@ -576,6 +586,47 @@ class Core96Head {
       }
       this.tipLength = length;
     }
+  }
+
+  // A brief white flash on the block itself, exactly matching Channel.
+  // pulse() -- the same "something is actively happening here" cue for an
+  // aspirate96/dispense96 arriving.
+  pulse() {
+    this.body.material.color.copy(PULSE_COLOR);
+    setTimeout(() => this.body.material.color.setHex(CORE96_EMPTY_COLOR), 250 * getDurationScale());
+  }
+
+  // direction: +1 to scroll "up" (aspirate), -1 to scroll "down"
+  // (dispense) -- exactly Channel.flowPulse()'s own scheme, just applied
+  // to the one shared `tipMaterial` all 96 tip cones already use (see the
+  // constructor's own comment on why they share it), so animating it once
+  // here visibly flows through all 96 at once instead of needing 96
+  // independent flow animations. Not routed through the leg-motion
+  // AnimationQueue -- like Channel's own version, this is a fire-and-
+  // forget decorative overlay timed to *when this op visually arrives*,
+  // not another leg to sequence.
+  flowPulse(direction) {
+    const material = this.tipMaterial;
+    const restoreColor = material.color.clone();
+    const texture = direction > 0 ? this.aspirateFlowTexture : this.dispenseFlowTexture;
+    material.map = texture;
+    material.color.setHex(0xffffff);
+    material.needsUpdate = true;
+
+    const start = performance.now();
+    const duration = FLOW_PULSE_MS * getDurationScale();
+    const step = (now) => {
+      const t = Math.min(1, (now - start) / duration);
+      texture.offset.y = direction * t * 2;
+      if (t < 1) {
+        requestAnimationFrame(step);
+      } else {
+        material.map = null;
+        material.color.copy(restoreColor);
+        material.needsUpdate = true;
+      }
+    };
+    requestAnimationFrame(step);
   }
 
   enqueue(target, duration, onComplete) {
@@ -714,14 +765,26 @@ export function handleOpEvent(msg) {
       break;
     case "aspirate96":
     case "dispense96": {
+      // Liquid flows "up" into the tips on aspirate, "down" out of them
+      // on dispense -- see Core96Head.flowPulse(), exactly Channel's own
+      // scheme.
+      const flowDirection = msg.op === "aspirate96" ? 1 : -1;
       animateCore96Op(msg, () => {
+        core96Head.pulse();
+        core96Head.flowPulse(flowDirection);
         // Same reuse as the tip-spot case above, one call per well --
         // visualizer_backend.py's _well_volume_entries() builds these with
         // field names matching a single-channel aspirate/dispense's own
         // embedded resource_volume/resource_max_volume specifically so
-        // this needs no separate per-well handling here.
-        for (const well of msg.wells ?? []) applyEmbeddedResourceState(well);
-        flashResource(msg.resource);
+        // this needs no separate per-well handling here. Flashing each
+        // *well* individually (not `flashResource(msg.resource)`, the
+        // whole plate at once) -- user-reported: "the plate lights up
+        // instead of the wells" -- matches a single channel's own
+        // per-well flash, just for all 96 at once instead of one.
+        for (const well of msg.wells ?? []) {
+          applyEmbeddedResourceState(well);
+          flashResource(well.resource);
+        }
       });
       logEvent(msg.op, `${msg.resource} (${msg.volume}µL)`);
       break;
