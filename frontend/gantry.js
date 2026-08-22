@@ -142,10 +142,16 @@ export class Channel {
 
     this.group = new THREE.Group();
 
-    // Sized a bit larger than a real Hamilton channel nose would be in mm --
-    // a to-scale glyph is nearly invisible against a ~1m deck, and legibility
-    // matters more here than strict scale accuracy for this one part.
-    const bodyGeom = new THREE.CylinderGeometry(7, 7, 32, 12);
+    // Radius 4.5 -- a 9mm diameter, exactly CHANNEL_Y_SPACING (the real
+    // Hamilton channel pitch two adjacent channels sit at) -- so neighbor
+    // bodies just touch at minimum spacing instead of overlapping (per
+    // user direction: a wider body was clipping into the next channel
+    // over). Still a bit larger than a real Hamilton channel nose itself
+    // would be in mm -- a fully to-scale glyph is nearly invisible against
+    // a ~1m deck -- but capped at the one real physical constraint that
+    // actually matters for legibility here (two channels never visually
+    // merge into one blob).
+    const bodyGeom = new THREE.CylinderGeometry(4.5, 4.5, 32, 12);
     // Own distinct hue per channel -- see channelColor()'s own comment.
     // Cached on the instance (not just recomputed inline) since pulse()
     // needs the exact same value to revert to afterward.
@@ -1065,12 +1071,6 @@ function animateCarriedPlateTo(x, y, z, onArrive) {
   carriedPlate.enqueue({ x, y, z }, scaled(DESCEND_MS), onArrive);
 }
 
-// One animateGripperStop() call's own total duration (rise+x+y+descend) --
-// what a *carried* plate needs to sit out, doing nothing, for each stop a
-// pickup enqueues on the channels *before* they've actually grabbed it
-// (the pad-attach stop, if any, and the grip-the-resource stop itself).
-const GRIPPER_STOP_MS = RISE_MS + X_MOVE_MS + Y_MOVE_MS + DESCEND_MS;
-
 // Holds the carried plate exactly still (no target change on any axis --
 // MotionUnit's own "stay wherever this leg starts" null-target meaning,
 // see enqueue()'s docstring) for `stops` gripper stops' worth of real
@@ -1088,9 +1088,37 @@ const GRIPPER_STOP_MS = RISE_MS + X_MOVE_MS + Y_MOVE_MS + DESCEND_MS;
 // Holding it here keeps its own timeline in lockstep with the channels'
 // real one, the same way animateGripperStop()'s own idle-channel dragging
 // keeps every *other* channel in lockstep with whichever two are active.
+//
+// Enqueued as `stops` sets of 4 separate null-target legs (rise/x/y/
+// descend), not one combined `GRIPPER_STOP_MS * stops` task -- these are
+// mathematically the same total duration, but *not* the same real
+// wall-clock time once AnimationQueue's own per-frame ticking is
+// accounted for: `AnimationQueue.update()` discards whatever `dt`
+// overshoots a task's own duration on the exact frame it completes
+// (`elapsed` resets to 0 for the next task, not `elapsed - duration`), so
+// every task *completion* can round up to the next real animation frame
+// -- more completions means more chances to lose a few ms this way. The
+// channels drive each stop as 4 separate legs (animateGripperStop()); a
+// single combined hold task has only 1 completion boundary where the
+// channels' own 4-leg version has 4 (times `stops`), so the two
+// routinely finish at slightly different real times even though they
+// share the exact same nominal duration and the exact same per-frame
+// `dt` (user-reported: "they almost travel together and only slightly
+// desync" -- confirmed via a standalone simulation of AnimationQueue's
+// real update loop at 60fps: a 2-stop hold as one combined task finishes
+// a *consistent* ~66.67ms -- almost exactly 4 frames -- before the
+// channels' own 8-leg-boundary version of the same nominal 2200ms
+// duration actually does, regardless of frame-phase offset). Matching the
+// leg count/durations exactly, not just the total, keeps both queues
+// losing the identical amount of rounding on the identical frames.
 function holdCarriedPlate(stops) {
   if (!carriedPlate) return;
-  carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(GRIPPER_STOP_MS * stops));
+  for (let i = 0; i < stops; i++) {
+    carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(RISE_MS));
+    carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(X_MOVE_MS));
+    carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(Y_MOVE_MS));
+    carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(DESCEND_MS));
+  }
 }
 
 export function handleOpEvent(msg) {

@@ -3304,6 +3304,50 @@ similar?").
       consecutive samples) -- the hold releasing at exactly the intended
       moment, not before.
 
+Fourth follow-up, same round -- user-reported: "they almost travel
+together and only slightly desync, but I am worry this is because of the
+inner working of the javascript package where the movement interpolations
+can differ between different objects." Also requested: widen the channel
+body cylinder to a 9mm diameter so neighboring channels' bodies don't
+clip into each other.
+
+- [x] **Researched and confirmed a real, precisely-measurable cause**
+      (not a vague "JS timing is imprecise" concern): `AnimationQueue.
+      update()` discards whatever `dt` overshoots a task's own duration on
+      the exact frame it completes (`elapsed` resets to `0` for the next
+      task, not `elapsed - duration`) -- every task *completion* can round
+      up to the next real animation frame, and more completions means more
+      chances to lose a few ms this way. `animateGripperStop()` drives
+      every channel through 4 *separate* legs per stop; `holdCarriedPlate
+      ()` (the previous round's own fix) drove the same nominal duration
+      as a *single combined* task -- 8 completion boundaries vs. 1, for a
+      2-stop pickup. A standalone simulation of `AnimationQueue`'s real
+      per-frame update loop at 60fps confirmed a consistent, phase-
+      independent ~66.67ms (almost exactly 4 frames) gap between when the
+      channel-style queue actually finishes a nominal 2200ms and when the
+      single-combined-task hold releases -- i.e. the hold was letting the
+      plate go a handful of frames *before* the channels had genuinely
+      finished, at 1x speed small enough to read as "almost synced," at
+      slower review speeds proportionally more noticeable.
+- [x] **Fix**: `holdCarriedPlate()` now enqueues `stops` sets of the exact
+      same 4 separate legs (rise/x/y/descend, matching `animateGripperStop
+      ()`'s own durations) instead of one combined task -- both queues now
+      lose the identical rounding on the identical frames, by construction.
+- [x] Verified with a deterministic Node test at real 60fps frame
+      granularity (not an arbitrary tick size): fired pickup then drop
+      with only 2 real frames between them (mirroring the actual near-zero
+      backend delay), then tracked, frame by frame, when channels[7]
+      actually reached its pickup grip z versus when the plate's own
+      position first changed. Pre-fix: the plate moved 3 frames *before*
+      the channels finished. Post-fix: 1 frame *after* -- confirmed this
+      test also reproduces the drift the standalone simulation predicted,
+      not just a synthetic duration-sum comparison.
+- [x] **Channel body widened to a 9mm diameter** (radius 4.5, was radius 7
+      = 14mm) -- exactly `CHANNEL_Y_SPACING`, so neighboring channel
+      bodies at minimum real spacing just touch instead of overlapping
+      (per user direction; confirmed live: a fresh `Channel`'s own
+      `body.geometry.parameters.radiusTop * 2` reads `9`).
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
