@@ -4025,6 +4025,93 @@ session, not just what a deterministic replay predicts).
       with no replay harness needed to see it. All 36 unit tests (30
       prior + 6 new for log.js) pass.
 
+## Review round 50
+
+User, mid-diagnosis of yet another sync bug ("The action to move plate
+out of the TC was too fast. It happens before the TC finishes shimmering
+and open its lid. Maybe we have the reverse problem that the gantry has
+to wait for the TC"): this was about to become a *third* symmetric
+bilateral bridge (the gantry now waiting on the thermocycler, mirroring
+`waitForGantry()`'s own thermocycler-waits-on-gantry direction) on top of
+the family that had already produced a new subtle double-counting bug in
+"Review round 44" through "48," every single time. Before implementing
+that bridge, the user redirected: "Many instruments can run concurrently
+in real life... but for the simple visualizer here, let's not worry too
+much about that, and consider using a global, linear queue for all the
+operations/animations?"
+
+- [x] **Retired the whole bilateral-bridge pattern outright.**
+      `gantryRemainingMs()`/`waitForGantry()` (both `frontend/gantry.js`)
+      deleted entirely -- not fixed a fourth time, replaced. In their
+      place: a single module-level `pendingOps` FIFO, plus
+      `isEverythingIdle()` (true only once every channel, the 96-head,
+      *and* every resource's own `animQueue` -- thermocyclers included --
+      has genuinely finished), plus `advanceOpQueue()` (exported, called
+      every frame from `main.js`'s `animate()`, right after every
+      `.update(dt)` call for that frame: `while (pendingOps.length > 0 &&
+      isEverythingIdle()) dispatchOp(pendingOps.shift())`). `handleOpEvent()`
+      -- the websocket-facing entry point, still called the instant an op
+      event arrives, routinely well before any previous op has finished
+      animating -- now just pushes onto `pendingOps` and returns; the
+      real animation logic (the former `handleOpEvent()` body, every
+      `case` unchanged) moved to a new, un-exported `dispatchOp()`,
+      called only once its own turn genuinely comes. One exception:
+      `"resource_reparented"` isn't an animation at all (see "Review
+      round 46"), so it still dispatches immediately/synchronously at
+      arrival time, same as before.
+- [x] **Why this beats a fourth bridge, structurally, not just
+      empirically:** every previous round's bug was some version of one
+      subsystem measuring another's *current* backlog and getting the
+      arithmetic wrong (absolute vs. relative, double-counted,
+      re-triggered mid-stack). Under a single global linear queue, no op
+      ever dispatches with anything left over from a prior op still in
+      flight -- `isEverythingIdle()` guarantees a clean slate every time
+      -- so there is no backlog left to measure, and therefore no
+      arithmetic left to get wrong. The user's originally-reported
+      "gantry needs to wait for the TC" bug (plate leaving the
+      thermocycler before its door finishes reopening) is fixed as a
+      structural guarantee of the new architecture, not a patched special
+      case.
+- [x] **Scope note, per user direction:** this project still only ever
+      animates one op at a time, globally, even though real Hamilton
+      instruments run concurrently (liquid handling continuing while the
+      TC cycles, say). Explicitly out of scope for this visualizer's
+      current purpose -- noted here so a future round doesn't mistake the
+      strictly-sequential behavior for an oversight.
+- [x] Verified with the same deterministic Node replay technique this
+      whole investigation has used throughout (`pcr_setup_demo.py`'s real
+      captured event stream, replayed through the real `gantry.js`/
+      `scene-builder.js`, ticking every channel/96-head/`animQueue` *and*
+      `advanceOpQueue()` every simulated frame -- the last piece every
+      existing replay script needed adding to catch up with this
+      round's change): all prior checks still pass (fill-then-move
+      ordering, exact round-trip position, no-teleport, lid+plate
+      move-together), plus a new direct check for the user's exact
+      report -- tracking the frame the thermocycler's door mesh position
+      settles back to its open pose a second time (after having closed
+      for cycling) against the frame the plate's own settled-on-the-TC
+      position first changes (its unload pickup) -- confirming
+      `doorReopenedFrame <= unloadPickupFrame` end to end (door reopened
+      at frame 3390, unload pickup didn't start until frame 3527, ~2.3s
+      later). Re-ran the simpler `core_gripper_demo.py` case (plain
+      plate-only moves, no lid) to confirm no regression there either.
+      Full `node --test ./tests/frontend/*.test.js` suite: 36/36 passing,
+      unchanged.
+- [x] **A methodology lesson from this round's own verification, not
+      from `gantry.js` itself:** two of the existing replay test scripts'
+      own "is the run finished yet" break conditions (`channels.every(c
+      => c.motion.remainingMs === 0) && f > 5`) were valid under the
+      *old* architecture (every op dispatched immediately at arrival, so
+      "channels idle" really did mean "everything is done") but wrong
+      under the new sequential one -- channels can go briefly idle
+      *between* two individually-dispatched ops that don't happen to
+      both touch channels (e.g. a thermocycler-only op) while `pendingOps`
+      still has plenty left, producing a false "ALL CHANNELS IDLE"
+      reading a few frames into the run and silently truncating the rest
+      of the test. Fixed by checking channels + the 96-head + every
+      resource's own `animQueue.isIdle` -- mirroring `isEverythingIdle()`
+      itself exactly, in both replay scripts.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

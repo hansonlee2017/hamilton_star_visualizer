@@ -32,6 +32,7 @@ import {
   core96Head,
   ensureChannels,
   handleOpEvent,
+  advanceOpQueue,
   setRestZ,
   setSceneRoot,
 } from "./gantry.js";
@@ -199,6 +200,15 @@ function animate(now) {
   // animation just starts enqueuing onto its own entry.animQueue with no
   // main.js change needed.
   for (const entry of resourceIndex.values()) entry.animQueue.update(dt);
+  // After every animatable thing has been ticked for this frame -- so a
+  // just-dispatched op's own freshly-enqueued legs don't also get ticked
+  // on this same frame, only starting to visibly move on the next one --
+  // dispatch gantry.js's own next queued op, if everything's now idle.
+  // See advanceOpQueue()'s own docstring for the whole reasoning (a
+  // single global linear queue of ops, replacing the family of bilateral
+  // "make subsystem A wait for subsystem B" bridges this project used to
+  // need).
+  advanceOpQueue();
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(animate);

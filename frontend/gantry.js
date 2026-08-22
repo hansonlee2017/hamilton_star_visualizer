@@ -1125,101 +1125,98 @@ function padTargets(backChannel, frontChannel, padY, padZ) {
   };
 }
 
-// Longest remaining real-world queued duration across the shared-X-rail
-// gantry -- every channel and the 96-head -- i.e. how long until the
-// gantry itself has genuinely finished whatever it's doing. Used by
-// waitForGantry() to make the thermocycler's own lid-slide/shimmer (the
-// only remaining caller -- a CoRe-gripper pickup no longer needs this at
-// all, see attachResourceTo()'s own docstring: a gripped resource simply
-// inherits the gripping channel's own motion, and that channel's own
-// FIFO queue *already* guarantees its approach legs play after whatever
-// was queued on it before, with no separate wait needed) wait for the
-// rest of the gantry to visually catch up first, instead of starting the
-// instant its own op event arrives -- which, per this whole project's "no
-// realtime delay from a sleep-free backend" design, is routinely while
-// something else (e.g. a reagent fill that happened to use the same two
-// channels a CoRe-gripper move defaults to) is still mid-animation.
-function gantryRemainingMs() {
-  let max = 0;
-  for (const ch of channels) max = Math.max(max, ch.motion.remainingMs);
-  max = Math.max(max, core96Head.motion.remainingMs);
-  return max;
+// A single global FIFO of op events not yet dispatched -- see
+// advanceOpQueue()'s own docstring for the whole reasoning. Deliberately
+// module-level, plain state, not wrapped in anything fancier: nothing
+// outside this file ever reads or writes it directly.
+const pendingOps = [];
+
+// True once every currently-playing animation -- every channel, the
+// 96-head, and every resource's own animQueue (populated today only for
+// thermocycler-category resources, but checked uniformly here rather
+// than special-cased by category, so any future category that starts
+// using its own animQueue is covered for free) -- has genuinely
+// finished. The one condition advanceOpQueue() waits for before
+// dispatching the next queued op.
+function isEverythingIdle() {
+  if (channels.some((ch) => ch.motion.remainingMs > 0)) return false;
+  if (core96Head.motion.remainingMs > 0) return false;
+  for (const entry of resourceIndex.values()) {
+    if (!entry.animQueue.isIdle) return false;
+  }
+  return true;
 }
 
-// Makes `entry`'s own animQueue (a thermocycler's lid-slide/shimmer --
-// see thermocycler.js's queueLidAnimation()/queueThermocyclerShimmer(),
-// the only callers) wait for the gantry to finish whatever it's currently
-// doing before its *next* enqueued task (the real animation the caller is
-// about to queue right after this) starts playing -- see
-// gantryRemainingMs()'s own docstring for the race this closes.
+// Ticked every frame from main.js's own animate() loop, right after every
+// channel/96-head/animQueue's own .update(dt) call for this frame --
+// dispatches the *next* queued op (see dispatchOp()) the moment
+// everything from the previous one has genuinely finished playing, never
+// before. Loops rather than dispatching at most one op per frame: a
+// queued op that doesn't animate anything at all (an unrecognized op
+// type, or a resource missing from resourceIndex) would otherwise cost a
+// whole extra frame of real delay for no reason, even though nothing
+// about it needed waiting for in the first place.
 //
-// A precomputed duration, snapshotted *now* -- deliberately not a live
-// `waitUntil` condition (a task type AnimationQueue briefly grew, then
-// removed again -- see that file's own header comment): channels are a
-// shared resource every future CoRe-gripper op for the rest of the whole
-// run keeps adding more legs to, and every op event for an entire run
-// arrives essentially all at once, well before any of them finishes
-// animating -- so a live "is the gantry empty yet" condition doesn't
-// distinguish "backlog that existed when I was enqueued" from "backlog
-// added by events that arrived after me but were already fed in before
-// any of this got a chance to tick," and wound up waiting for the whole
-// rest of the run instead of just what preceded it (see "Review round
-// 47"). A snapshot doesn't have that problem: what was queued on the
-// gantry *before this specific op's own event arrived* is a fixed,
-// already-fully-determined quantity the moment this runs.
-//
-// `entry.animQueue`'s own already-queued backlog is subtracted out,
-// though -- this whole run's own thermocycler calls fire close together
-// (open_lid, close_lid, run_protocol, open_lid again -- see
-// pcr_setup_demo.py), each calling this function in turn, all in the same
-// "every op event arrives before any of them finishes animating" burst.
-// `gantryRemainingMs()` is an *absolute* quantity, measured fresh from
-// "now" on every call -- but every one of *this queue's own* earlier
-// wait+animation tasks (from an earlier waitForGantry() call plus
-// whatever real animation followed it) also takes real time to play out,
-// during which the channels keep draining the *same* backlog a later
-// call's own fresh gantryRemainingMs() snapshot would otherwise measure
-// all over again. Enqueuing the raw absolute value on top of this
-// queue's own already-queued backlog re-counted time that was never
-// actually still outstanding -- exactly the same double-counting
-// docs/PLAN.md's "Review round 45" already fixed once for
-// holdCarriedPlate(), just recurring here for entry.animQueue instead of
-// a carried resource's own queue (confirmed live: a captured
-// pcr_setup_demo.py event stream, replayed through the real frontend
-// modules, showed thermocycler_1's own animQueue holding a combined
-// ~189.5s of queued waits+animations moments after every op event was
-// fed in -- close_lid/run_protocol/the second open_lid's own animations
-// were never actually skipped, just each pushed enormously further out
-// by a redundant wait stacked on top of the last one, reading as
-// "skipped" to anyone not watching for over three minutes). Subtracting
-// `entry.animQueue.remainingMs` converts the absolute snapshot into the
-// actual remaining deficit -- 0 whenever this queue's own already-queued
-// backlog already outlasts the gantry's (the common case for every
-// thermocycler call after the first one in a burst like this), and only
-// the genuine shortfall (new channel work queued since the last call)
-// otherwise.
-function waitForGantry(entry) {
-  const gantryMs = gantryRemainingMs();
-  const alreadyQueuedMs = entry.animQueue.remainingMs;
-  const holdMs = Math.max(0, gantryMs - alreadyQueuedMs);
-  log.debug(
-    `waitForGantry(${entry.node?.name ?? "?"}): gantryRemainingMs=${gantryMs.toFixed(0)}ms`,
-    `animQueue.remainingMs=${alreadyQueuedMs.toFixed(0)}ms`,
-    `-> holdMs=${holdMs.toFixed(0)}ms`
-  );
-  if (holdMs > 0) {
-    entry.animQueue.enqueue({ duration: holdMs, onTick: () => {} });
+// This is this project's entire current answer to what used to be a
+// family of bespoke, bug-prone bilateral "make subsystem A wait for
+// subsystem B's own current backlog" bridges
+// (gantryRemainingMs()/holdCarriedPlate()/waitForGantry() -- see
+// docs/PLAN.md's "Review round 44" through "48," each one finding a
+// *new* subtle double-counting bug in one direction or the other) -- and
+// was about to grow a *third*, symmetric one (the gantry waiting on the
+// thermocycler this time, user-reported: "The action to move plate out
+// of the TC was too fast. It happens before the TC finishes shimmering
+// and open its lid") had this round kept extending that same pattern
+// instead of replacing it outright. Per user direction: "many
+// instruments can run concurrently in real life... but for the simple
+// visualizer here, let's not worry too much about that, and consider
+// using a global, linear queue for all the operations/animations." One
+// op animates at a time, in the exact order its own event arrived,
+// regardless of which objects it happens to touch -- there is no
+// bridging arithmetic of any kind left to get wrong, because there is
+// never more than one op's own backlog in flight to reason about at all:
+// by the time any op is dispatched, *everything* -- channels, the
+// 96-head, every thermocycler's own animQueue -- is already known to be
+// completely idle, guaranteed by this exact function, not computed or
+// assumed by the op's own handler.
+export function advanceOpQueue() {
+  while (pendingOps.length > 0 && isEverythingIdle()) {
+    dispatchOp(pendingOps.shift());
   }
 }
 
+// The websocket-facing entry point (see main.js's own connect() wiring)
+// -- called the instant an op event arrives, which, per this whole
+// project's own "no realtime delay from a sleep-free backend" design, is
+// routinely well before any *previous* op's own animation has actually
+// finished playing. Does no animating itself: "resource_reparented" (not
+// an animation at all, just a PyLabRobot resource-tree signal -- see
+// that case's own comment inside dispatchOp()) is handled immediately,
+// synchronously, since nothing about it needs gating; every other op is
+// just queued onto `pendingOps` for advanceOpQueue() to dispatch once
+// its own turn genuinely comes, one at a time, in arrival order.
 export function handleOpEvent(msg) {
-  // The one place every op event -- however many more of this file's own
-  // enqueue()/attach() calls it ends up triggering -- passes through, so
-  // `window.__log.setLevel("info")` (see log.js) alone is enough to get a
-  // timestamped "what op arrived when" trace without touching any other
-  // call site. `?logLevel=` details finer than this (individual attaches,
-  // computed waits) log at "debug" instead -- see e.g. attachResourceTo()/
-  // waitForGantry()'s own calls.
+  if (msg.op === "resource_reparented") {
+    dispatchOp(msg);
+    return;
+  }
+  log.debug(`queued: ${msg.op} ${msg.resource ?? ""}`);
+  pendingOps.push(msg);
+}
+
+// The real op-event handler, previously exported directly as
+// handleOpEvent() itself -- see that function's own docstring, and
+// advanceOpQueue()'s, for why a dispatch now only ever happens once
+// everything from the *previous* op has genuinely finished playing.
+// `window.__log.setLevel("info")` (see log.js) alone is enough to get a
+// timestamped "what op actually started animating when" trace without
+// touching any other call site -- deliberately logged here, at dispatch
+// time, not in handleOpEvent() at arrival time: every op for an entire
+// run arrives within milliseconds of every other one, so an
+// arrival-time timestamp would carry almost no information; a
+// dispatch-time one is exactly "when did this actually start playing,"
+// which is what a trace like this exists to answer.
+function dispatchOp(msg) {
   log.info(msg.op, msg.resource ?? "");
   switch (msg.op) {
     case "pick_up_tips":
@@ -1273,7 +1270,6 @@ export function handleOpEvent(msg) {
     case "thermocycler_close_lid": {
       const entry = resourceIndex.get(msg.resource);
       if (entry) {
-        waitForGantry(entry);
         queueLidAnimation(entry, msg.op === "thermocycler_open_lid");
       }
       logEvent(msg.op, msg.resource ?? "");
@@ -1283,7 +1279,6 @@ export function handleOpEvent(msg) {
       const entry = resourceIndex.get(msg.resource);
       if (entry) {
         entry.protocolSummary = msg.protocol_summary;
-        waitForGantry(entry);
         queueThermocyclerShimmer(entry);
       }
       logEvent(msg.op, `${msg.resource}: ${msg.protocol_summary ?? ""}`);
@@ -1362,10 +1357,12 @@ export function handleOpEvent(msg) {
       // have actually risen, traveled, and descended onto it) and not via
       // any separate queue that then has to be kept in lockstep with this
       // one by hand (see attachResourceTo()'s own docstring). No waiting
-      // needed for whatever backlog the gantry already had queued before
-      // this pickup's own legs, either -- they're appended to the *same*
-      // channels' own FIFO queues, so they already play only after
-      // anything already there, for free.
+      // needed for whatever might still be running elsewhere, either --
+      // dispatchOp() (see advanceOpQueue()'s own docstring) never even
+      // runs this case until every channel, the 96-head, and every
+      // thermocycler's own animQueue are already completely idle, so
+      // there is nothing left over to wait for by the time this handler
+      // starts.
       animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front, () => {
         attachResourceTo(msg.resource, { x: msg.x, y: msg.y, z: msg.z }, channels[front]?.group);
       });
@@ -1400,35 +1397,26 @@ export function handleOpEvent(msg) {
       // entry.pendingParents' own group if a "resource_reparented" event
       // (see that case below) has already told us this resource is
       // landing seated on another one (e.g. a lid capped onto a plate).
-      // That event is a real PyLabRobot resource-tree signal, sent the
-      // moment the backend's own `assign_child_resource()` call actually
-      // runs -- which, per this whole project's "no realtime delay from a
-      // sleep-free backend" design, happens essentially instantly
-      // relative to real animation playback -- so by the time *this*
-      // callback fires, after this leg's own real, scaled DESCEND_MS has
-      // genuinely played out, entry.pendingParents already has an entry
-      // for this drop, however long ago (in real event-processing terms)
-      // it arrived.
       //
-      // A FIFO queue, not a single mutable field: every op event for the
-      // *entire* run arrives essentially all at once, well before any of
-      // them actually finishes playing (this same "events arrive
-      // instantly, animation takes real time" gap is why this whole
-      // mechanism exists at all -- see gantryRemainingMs()'s own
-      // docstring). A resource picked up and dropped more than once in
-      // one run (every lid in this project's own demos: capped, then
-      // uncapped -- see pcr_setup_demo.py) gets *all* of its own
-      // resource_reparented events queued up before *any* of its drops'
-      // own onArrive callbacks have fired -- confirmed live: a single
-      // mutable `entry.pendingParent` field ended up holding whichever
-      // one arrived *last* (the uncap's own, landing back on a plain
-      // carrier slot -- correctly `null`) by the time the *first* drop's
-      // (the cap's) own onArrive actually ran, silently discarding the
-      // "seat it on the plate" decision that drop was supposed to apply,
-      // and leaving the lid parented under sceneRoot instead -- exactly
-      // why the lid never visibly rode along with the plate's own later
-      // moves despite pcr_setup_demo.py no longer sending any lid-specific
-      // event for them at all. Queueing and shifting one entry per drop
+      // Still a FIFO queue, not a single mutable field, even now that
+      // dispatchOp() only ever runs one op at a time (see
+      // advanceOpQueue()'s own docstring): "resource_reparented" is
+      // handled immediately, at event-arrival time, *not* gated behind
+      // the same op queue this drop itself waited its turn in (see
+      // handleOpEvent()'s own docstring for why) -- and every op event
+      // for an entire run still arrives essentially all at once, well
+      // before dispatch of even the *first* one begins. So a resource
+      // picked up and dropped more than once in one run (every lid in
+      // this project's own demos: capped, then uncapped -- see
+      // pcr_setup_demo.py) still gets *all* of its own resource_reparented
+      // events queued up before *any* of its own drops are even
+      // dispatched, let alone reach this callback -- confirmed live, back
+      // when this was a single mutable `entry.pendingParent` field: it
+      // ended up holding whichever one arrived *last* (the uncap's own,
+      // landing back on a plain carrier slot -- correctly `null`) by the
+      // time the *first* drop's (the cap's) own onArrive actually ran,
+      // silently discarding the "seat it on the plate" decision that drop
+      // was supposed to apply. Queueing and shifting one entry per drop
       // matches each drop to the correct one in order instead.
       animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front, () => {
         const parentName = entry?.pendingParents?.shift() ?? null;
