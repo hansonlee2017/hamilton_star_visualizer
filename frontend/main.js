@@ -144,8 +144,27 @@ initTooltip(camera, renderer, tooltipEl);
 // Render loop
 // ---------------------------------------------------------------------------
 let lastTime = performance.now();
+// Caps how much simulated time a single frame can ever advance queued
+// animations by. Without this, any real gap between two consecutive
+// requestAnimationFrame callbacks -- a backgrounded/minimized tab (browsers
+// throttle or fully pause rAF for hidden tabs), a slow synchronous script
+// elsewhere on the page, even just this browser's dev-tools paused on a
+// breakpoint -- feeds straight into `dt` as one giant number on the next
+// callback, and a single Channel.update(dt)/AnimationQueue.update(dt) call
+// with a multi-second dt finishes whatever's currently animating instantly.
+// With the thermocycler's ops now firing back-to-back with no
+// asyncio.sleep() between them (see docs/PLAN.md's "Review round 37"), the
+// *entire* close/shimmer/open story depends on the frontend actually
+// spending real frames animating it -- a single stray large-dt frame right
+// after Start is clicked was enough to blow through the whole queue at
+// once (user-reported: "the lid opens before the thermal cycling
+// animation finished... I did not see the close lid animation" -- round
+// 38). Clamping means a resumed/throttled tab just takes longer in real
+// time to finish whatever was still queued, rather than skipping to the
+// end -- the standard fix for this whole class of rAF pitfall.
+const MAX_FRAME_DT_MS = 50;
 function animate(now) {
-  const dt = now - lastTime;
+  const dt = Math.min(now - lastTime, MAX_FRAME_DT_MS);
   lastTime = now;
   for (const ch of channels) ch.update(dt);
   // Every resource's own AnimationQueue (currently only ever populated for

@@ -2545,6 +2545,72 @@ mounted unit (0 for the channel group, a real Hamilton-derived constant for
 shared carriage reference as `armX = opX - thisUnit.xOffsetMm`, then any
 *other* mounted unit's idle-drag target is `armX + thatUnit.xOffsetMm`.
 
+## Review round 38
+
+User-reported, again, after round 37's AnimationQueue fix: "it looks like
+the lid opening and thermocycling happens at the same time? And I did not
+see the close lid animation." Two distinct real bugs, not one -- both
+found and fixed this round, neither a repeat of round 37's actual queue
+logic (which tests/frontend/animation-queue.test.js and
+motion-unit.test.js already covered correctly).
+
+- [x] **Stale browser cache**: `server.py`'s no-cache treatment
+      (`Cache-Control: no-store`) was still a single hardcoded
+      `/static/main.js` route, left over from before round 36 split
+      `main.js` into a dozen files -- every *other* module
+      (`gantry.js`, `thermocycler.js`, `animation-queue.js`, ...) silently
+      fell through to the generic `/static` mount and kept its default,
+      cacheable headers. A tab left open across several rounds of edits
+      (exactly this session's pattern) could easily be running a stale mix
+      of old and new modules with no way to tell from the outside --
+      confirmed live via `curl -D -`: `/static/gantry.js` had no
+      `Cache-Control` header at all before this fix. Replaced the single
+      hardcoded route with `/static/{filename}` matching any top-level
+      `*.js` file (Starlette's default `str` path converter doesn't match
+      `/`, so `/static/vendor/three.module.js` -- deliberately still
+      cacheable, pinned third-party code -- never reaches it and falls
+      through to the mount unchanged, confirmed live). Fixes this specific
+      bug category permanently instead of needing a new hardcoded line
+      every time this project's frontend grows another file.
+- [x] **Unclamped render-loop `dt`**: the real bug behind "opens before
+      cycling finished" even on a *fresh, uncached* load. `main.js`'s
+      `animate(now)` computed `dt = now - lastTime` with no ceiling --
+      completely standard requestAnimationFrame code, but a well-known
+      pitfall: any real gap between two consecutive callbacks (a
+      backgrounded/minimized tab, since browsers throttle or fully pause
+      rAF for hidden tabs; a slow synchronous script; a dev-tools
+      breakpoint) feeds straight into `dt` as one giant number on the next
+      callback. Round 37's whole fix depends on the *frontend* actually
+      spending real frames animating the close/shimmer/open sequence
+      (there are no `asyncio.sleep()`s left to space it out on the Python
+      side any more) -- a single stray large-`dt` frame right after "Start
+      Protocol" is clicked is enough to blow through the entire queued
+      sequence in one call. This reproduced reliably in this session's own
+      testing tooling too (the browser pane went through a stretch of not
+      compositing frames at all -- confirmed via a live
+      `requestAnimationFrame` probe -- and the very next frame after it
+      resumed instantly drained a freshly-enqueued 4-task queue). Fixed
+      with `Math.min(now - lastTime, MAX_FRAME_DT_MS)` (50ms -- a few
+      normal frames' worth, so real 60fps playback is completely
+      unaffected, but a resumed/throttled tab now takes longer in real
+      time to finish whatever was still queued instead of skipping to the
+      end -- the standard fix for this whole class of rAF pitfall).
+
+      Verified live with precise in-page timing (`performance.now()`-based
+      sampling inside a single `javascript_exec` call, to rule out this
+      session's own tool round-trip latency from masking the real
+      elapsed time): clicking Start and sampling
+      `resourceIndex.get('thermocycler_1')` at nine fixed real-time
+      offsets (200ms through 7500ms) showed the *first* open completing by
+      ~200ms, a genuinely visible close mid-slide at 800ms (lid z
+      interpolating between its open and closed positions, `lidOpen:
+      false`, one task still ahead of it in the queue), the shimmer
+      holding the lid closed and steady from ~1.4s through ~6s (matching
+      its 5-second duration), and the final open completing cleanly around
+      ~7s with the queue fully drained (`isIdle: true`) -- the complete,
+      correctly-paced story this round set out to produce, not the
+      near-instant collapse the user reported.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

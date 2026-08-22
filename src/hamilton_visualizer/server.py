@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -109,21 +109,46 @@ class VisualizerServer:
 
     app = FastAPI()
 
-    # index.html and main.js are what you'd actually be iterating on; explicit
-    # routes here (matched before the /static mount below) keep the browser
-    # from serving a stale cached copy after an edit -- easy to lose time to
-    # otherwise, since FileResponse/StaticFiles don't set no-cache by default.
+    # index.html and every frontend/*.js module are what you'd actually be
+    # iterating on; explicit routes here (matched before the /static mount
+    # below) keep the browser from serving a stale cached copy after an
+    # edit -- easy to lose time to otherwise, since FileResponse/
+    # StaticFiles don't set no-cache by default. This used to be a single
+    # hardcoded "/static/main.js" route, back when main.js was the only
+    # frontend file -- once it was split into coordinates.js/gantry.js/
+    # thermocycler.js/etc. (see docs/PLAN.md's "Review round 36"), every
+    # *other* module silently fell through to the generic mount below and
+    # kept its default (cacheable) headers, which is exactly how a browser
+    # ended up running a stale mix of old and new modules after later
+    # edits (round 38: a user's still-open tab kept animating the
+    # thermocycler with pre-AnimationQueue logic well after the fix
+    # shipped). Matching any top-level *.js file, not just main.js, is what
+    # actually fixes that instead of needing a new hardcoded route added
+    # every time this project's frontend grows another module.
+    #
     # The vendored third-party files under frontend/vendor/ are pinned and
-    # don't change, so they're left cacheable via the mount.
+    # don't change, so they're deliberately left cacheable via the mount --
+    # this route's {filename} path parameter never matches a path
+    # containing "/" (Starlette's default str converter, unlike the
+    # "path" converter, stops at the next slash), so a request for
+    # /static/vendor/three.module.js can never reach this function at all;
+    # it always falls through to the mount below unchanged.
     no_cache = {"Cache-Control": "no-store"}
 
     @app.get("/")
     async def index() -> FileResponse:
       return FileResponse(FRONTEND_DIR / "index.html", headers=no_cache)
 
-    @app.get("/static/main.js")
-    async def main_js() -> FileResponse:
-      return FileResponse(FRONTEND_DIR / "main.js", headers=no_cache)
+    @app.get("/static/{filename}")
+    async def frontend_js(filename: str) -> FileResponse:
+      candidate = FRONTEND_DIR / filename
+      if filename.endswith(".js") and candidate.is_file():
+        return FileResponse(candidate, headers=no_cache)
+      # Not a top-level .js module this route owns -- e.g. a typo'd path,
+      # or (in principle; nothing in frontend/ currently needs this) some
+      # other top-level non-.js asset. Not the vendor/three-module.js case
+      # above -- that never reaches here at all.
+      raise HTTPException(status_code=404)
 
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
