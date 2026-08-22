@@ -2391,6 +2391,37 @@ starting -- both confirmed as proposed.
       event log matched pre-split runs exactly. `docs/DESIGN.md`'s file
       tree and `README.md`'s testing section updated to match.
 
+      Follow-up fix (same round): user-reported "the timing isn't right --
+      the thermocycling starts before the lid opening, and the lid did not
+      close in the visualizer." Root cause: the lid starts *closed* by
+      default (`scene-builder.js`'s baked-in initial `lidMesh` position --
+      there's no "starts open" scene attribute), and the script's very
+      first lid op was `close_lid()` -- closing an already-closed lid is a
+      no-op tween (identical start/end position), so it was never visible.
+      The only lid motion in the whole run was the final open, which read
+      as the cycling animation having started with no lid movement at all
+      beforehand. Fixed by opening the lid first ("loading the plate")
+      before ever closing it, so the subsequent close is a real, visible
+      animation -- the full story is now open (load) -> close (visible) ->
+      shimmer (cycling) -> open (visible, done).
+
+      Also switched from Replay to a proper `while True:`/`wait_for_reset()`
+      loop (matching `picogreen_demo.py`'s "start the entire thing over"
+      pattern) per user suggestion ("perhaps it is easier just reset
+      everything instead of replay"). This sidesteps a real Replay/live
+      timing mismatch this round's pacing fix exposed:
+      `VisualizerServer.replay()` caps a replayed gap between two events at
+      2 real seconds (`MAX_REPLAY_GAP`), but the script's own 5-second
+      shimmer-then-open pause is longer than that cap -- replaying it would
+      fire `open_lid()` while the frontend's fixed 5-second shimmer
+      animation was still only 2 seconds in, silently undoing the very
+      pacing fix that made the lid open *after* cycling instead of during
+      it. A fresh live run (via Reset) has no such cap. Verified live:
+      full open/close/shimmer/open sequence with correct 5-second pacing
+      (confirmed via event-log timestamps), then Reset produced a fresh
+      scene (lid back to its closed default) ready for another run, with a
+      clean browser console throughout.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
