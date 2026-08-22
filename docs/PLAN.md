@@ -2529,7 +2529,9 @@ user before writing any code (per their explicit request).
       at exactly 40uL, channels ended at the trash with tips dropped, y
       positions still correctly 9mm-spaced.
 
-**Deferred: cross-mechanism X sharing (for the CO-RE 96 head round).** The
+**Deferred: cross-mechanism X sharing (for the CO-RE 96 head round).**
+Implemented in "Review round 40" below, once the CO-RE 96 head itself
+existed to build the second half of this against. The
 96-head and the 8 channels share the gantry's one physical X drive (so
 whichever one moves, the *other* needs an X-only "drag along" nudge --
 exactly generalizing `nudgeChannel()`'s existing idle-channel-dragging in
@@ -2830,6 +2832,75 @@ too.
       (`sawPlateFlash: false`), directly disproving the original "plate
       lights up" complaint under the fix. Both plates' volumes still
       correct end-to-end afterward, clean console throughout.
+
+## Review round 40
+
+User-reported: "Now I would like the 8-channel pipettes to move with the
+96 well head as discussed earlier. Right now the eight channels seems to
+be stationary during the core96 well operations." The cross-mechanism X
+sharing round 37 deferred (no second unit to verify it against at the
+time) -- implemented now that `Core96Head` exists.
+
+- [x] **Real offset value, not a guess**: PyLabRobot's own
+      `STAR_backend.py` documents the exact quantity needed --
+      `_head96_request_x_offset()` reads it live from the instrument's own
+      EEPROM ("X-arm carriage center <-> CoRe 96 head channel A1"), and
+      its own comment gives a representative magnitude: "the head96
+      offset is ~10x the iSWAP's (~368 mm vs ~34 mm)". `CORE96_X_OFFSET_MM
+      = 368` in `gantry.js`, documented as representative (it's a live
+      EEPROM read on real hardware specifically because it varies per
+      physical unit) rather than universal. Direction -- which mechanism
+      sits at higher X -- isn't in that source; taken from user direction
+      instead ("the 8 channel pipette should be to the right of the core96
+      head" -- initially described as a Y relationship, corrected to X
+      one message later).
+- [x] **Bidirectional dragging**: `animateChannelGroupOp()` (every
+      channel op) now also calls a new `nudgeCore96Head(x)` per gantry
+      pass, converting that pass's channel-frame x into the head's own
+      frame; `animateCore96Op()` (every 96-head op) now also calls
+      `nudgeChannel()` for all 8 channels, converting the other direction.
+      `nudgeCore96Head()` mirrors `nudgeChannel()`'s own "dragged along,
+      not actually doing anything" shape and duration exactly (same
+      `RISE_MS`/`X_MOVE_MS`/`Y_MOVE_MS`/`DESCEND_MS+HOLD_MS+RETRACT_MS`
+      legs), so whichever mechanism is "idle" this particular op still
+      finishes its drag in lockstep with the "active" one, the same
+      lockstep reasoning `nudgeChannel()`'s own docstring already gives
+      for idle channels within a multi-channel op.
+- [x] **Rest positions now derived, not independently guessed**: per
+      follow-up user direction ("set the starting position of the 96 head
+      at just above its trash can, while putting the 8 channels at the
+      corresponding x-offset"), `CORE96_REST_X_MM`/`CORE96_REST_Y_MM`
+      changed from an arbitrary out-of-the-way spot to
+      `STARDeck().get_trash_area96()`'s own real position (confirmed live:
+      `Coordinate(-58.200, 106.000, 216.400)`) -- a real deck landmark
+      instead of a made-up one. `Channel`'s own initial rest X changed
+      from a hardcoded `0` to `CORE96_REST_X_MM + CORE96_X_OFFSET_MM`,
+      so the two mechanisms start out already consistent with the
+      relationship they're dragged to maintain, rather than only
+      converging on it once the first op fires.
+
+      A mid-conversation aside from the user, while this was in progress,
+      described the 96-head's/channels' own natural leftward/rightward
+      *reach* each barely clearing their own respective trash -- confirmed
+      as intentional context (real `trash_core96`/`trash` sit at opposite
+      deck extremes, `x=-58.2` and `x=1340` on a 1545mm-wide `STARDeck`,
+      confirmed live), not a bug to fix.
+
+      Verified live: the core invariant (`channels[i].pos.x -
+      core96Head.pos.x === CORE96_X_OFFSET_MM`, in both directions) held
+      exactly across a standalone script exercising both mechanisms in one
+      run (`pick_up_tips96`/`drop_tips96` then a single-channel
+      `pick_up_tips`/`discard_tips`) -- confirmed both immediately after
+      the sign fix (`+368` the intended direction) and mid-sequence during
+      active dragging, not just at rest. Fresh rest-state confirmed
+      exactly: `core96Head.pos` `{x: -58.2, y: 106}` (matching
+      `trash_core96` exactly), `channels[0].pos.x` `309.8` (`=
+      -58.2 + 368`). Re-ran `core96_demo.py` (which now also exercises the
+      new channel-dragging path on every 96-head op, even though it never
+      uses the channels itself) end-to-end -- both plates' volumes still
+      transferred correctly, clean console, offset invariant held
+      mid-sequence too. 30/30 frontend tests and 24/24 Python tests
+      unaffected.
 
 ## Stretch / explicitly deferred (not v1)
 

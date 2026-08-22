@@ -86,8 +86,19 @@ export class Channel {
     // MotionUnit (see motion-unit.js) -- shared with a future Core96Head,
     // per docs/PLAN.md's "Review round 37" design discussion -- not
     // reimplemented here.
+    // Rest X derived from the 96-head's own rest position (parked just
+    // above its own trash, see CORE96_REST_X_MM's own comment) plus the
+    // same CORE96_X_OFFSET_MM every cross-mechanism drag already uses --
+    // not an independent number -- so the two mechanisms start out
+    // already consistent with the relationship they're dragged to
+    // maintain, instead of only becoming so once the first op fires.
+    // Forward reference to constants defined later in this file (with
+    // Core96Head) -- safe: this constructor only ever runs from
+    // ensureChannels(), itself only called once a "scene" message
+    // arrives, long after the whole module (and every one of its
+    // module-level consts) has finished evaluating.
     this.motion = new MotionUnit(
-      { x: 0, y: -index * CHANNEL_Y_SPACING, z: restZ },
+      { x: CORE96_REST_X_MM + CORE96_X_OFFSET_MM, y: -index * CHANNEL_Y_SPACING, z: restZ },
       () => this.applyPosition()
     );
     this.hasTip = false;
@@ -407,6 +418,19 @@ function nudgeChannel(channelIndex, x, y, { traverseHeightMm, endHeightMm } = {}
   ch.enqueue({ x, y, z: retractZ }, scaled(DESCEND_MS + HOLD_MS + RETRACT_MS));
 }
 
+// Same idea as nudgeChannel() -- dragged along in X only, own Y/Z
+// untouched -- for the CO-RE 96 head instead of one channel, since it
+// rides the same shared X rail (see CORE96_X_OFFSET_MM's own comment).
+// Same leg-duration shape as nudgeChannel()/animateCore96Op() so every
+// mechanism's passes stay lockstep regardless of which one is "active"
+// this particular op.
+function nudgeCore96Head(x) {
+  core96Head.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
+  core96Head.enqueue({ x, y: null, z: restZ }, scaled(X_MOVE_MS));
+  core96Head.enqueue({ x, y: null, z: restZ }, scaled(Y_MOVE_MS));
+  core96Head.enqueue({ x, y: null, z: restZ }, scaled(DESCEND_MS + HOLD_MS + RETRACT_MS));
+}
+
 function flashResource(resourceName) {
   const entry = resourceIndex.get(resourceName);
   if (!entry || !entry.mesh) return;
@@ -424,6 +448,14 @@ function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor, traverseHe
     for (const [ch, y] of pass.idleMoves) {
       nudgeChannel(ch, pass.x, y, { traverseHeightMm, endHeightMm });
     }
+    // The 96-head rides the same shared X rail as the 8 channels (see
+    // CORE96_X_OFFSET_MM's own comment) -- every channel pass drags it
+    // along too, converting this pass's channel-frame x into the head's
+    // own frame the same way animateCore96Op()'s own passes convert back
+    // (user-reported: "the eight channels seem to be stationary during
+    // the core96 well operations" -- true in both directions before this,
+    // just reported from the channels' side).
+    nudgeCore96Head(pass.x - CORE96_X_OFFSET_MM);
     for (const entry of pass.active) {
       animateChannelOp(entry, {
         onArrive: makeOnArrive(entry),
@@ -482,12 +514,33 @@ const CORE96_EMPTY_COLOR = 0x4fa8c9;
 // setTips(present) via `.visible`, the same way, not a hue/opacity change.
 const CORE96_TIP_ROWS = 8;
 const CORE96_TIP_COLS = 12;
-// Parked position when nothing's queued -- off to one side so it doesn't
-// sit in the middle of a deck screenshot when unused. Not a real
-// Hamilton home-position value (this project doesn't model the 96-head's
-// own parking mechanism), just a reasonable out-of-the-way constant.
-const CORE96_REST_X_MM = 60;
-const CORE96_REST_Y_MM = 40;
+// Parked position when nothing's queued -- directly above the head's own
+// trash (`STARDeck().get_trash_area96()`, confirmed live:
+// `Coordinate(-58.200, 106.000, 216.400)`) per user direction, rather
+// than an arbitrary out-of-the-way spot -- not a real Hamilton
+// home-position value (this project doesn't model the 96-head's own
+// parking mechanism), but at least a real, meaningful deck landmark
+// instead of a made-up one. `restZ` (the shared gantry rise/retract
+// height, already comfortably above everything on deck -- see
+// setRestZ()) covers "above," so only x/y need to match the trash here.
+const CORE96_REST_X_MM = -58.2;
+const CORE96_REST_Y_MM = 106.0;
+// The 96-head and the 8 channels are two separate arm assemblies riding
+// the *same* physical X rail on a real Hamilton STAR -- sharing one X
+// drive, but not sitting at the same absolute X (mechanically offset
+// along the rail -- user-flagged, see docs/PLAN.md's "Review round 37"
+// design discussion). Real value: PyLabRobot's own STAR_backend.py
+// documents this exact quantity -- `_head96_request_x_offset()` reads it
+// live from the instrument's own EEPROM ("X-arm carriage center <-> CoRe
+// 96 head channel A1") and its own comment gives a representative
+// magnitude: "the head96 offset is ~10x the iSWAP's (~368 mm vs ~34
+// mm)". It varies slightly per physical unit (that's the whole reason
+// it's a live-read EEPROM value, not a constant, on real hardware) --
+// 368mm here is representative, not universal. Direction (per user
+// direction: the 8 channels sit at *higher* X than the head, i.e.
+// `channelX = headX + CORE96_X_OFFSET_MM`) isn't stated in that source;
+// taken from user direction, not derived from it.
+const CORE96_X_OFFSET_MM = 368;
 
 class Core96Head {
   constructor() {
@@ -641,11 +694,15 @@ class Core96Head {
 export const core96Head = new Core96Head();
 
 // Same six-leg rise/x/y/descend/hold/retract shape as animateChannelOp(),
-// just for one rigid body instead of one channel among eight -- no
-// planGantryPasses()/idle-channel dragging needed, since there's nothing
-// else on this mechanism's own motion queue to coordinate with (see this
-// section's own header comment for why the 8 channels aren't dragged
-// along here either, at least not yet).
+// just for one rigid body instead of one channel among eight. No
+// planGantryPasses()-style row-conflict resolution needed for the head
+// itself (it's one rigid body engaging one x/y target, not 8 independent
+// channels that might each want a different y) -- but it drags the 8
+// channels along in X too, converting its own target into their shared-
+// rail frame via CORE96_X_OFFSET_MM, the same physical constraint
+// animateChannelGroupOp() drags the head along for in the other
+// direction (user-reported: "the eight channels seem to be stationary
+// during the core96 well operations").
 //
 // `msg.z` is the touched resource's own reported *top* (resource_point()'s
 // top-center anchor -- see events.py), i.e. where the *tips' own points*
@@ -669,6 +726,10 @@ export const core96Head = new Core96Head();
 // carrying that same tip throughout.
 function animateCore96Op(msg, onArrive, tipLength) {
   const targetZ = () => msg.z + CORE96_ENGAGE_CLEARANCE_MM + (tipLength ?? core96Head.tipLength);
+  const channelX = msg.x + CORE96_X_OFFSET_MM;
+  for (let i = 0; i < channels.length; i++) {
+    nudgeChannel(i, channelX, channels[i].pos.y);
+  }
   core96Head.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
   core96Head.enqueue({ x: msg.x, y: null, z: restZ }, scaled(X_MOVE_MS));
   core96Head.enqueue({ x: msg.x, y: msg.y, z: restZ }, scaled(Y_MOVE_MS));
