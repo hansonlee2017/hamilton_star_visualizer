@@ -26,6 +26,16 @@ export const CATEGORY_COLORS = {
   // sharing the well-fill-gradient's hue (green, previously 0x3d9970) made
   // the base blend into its own contents instead of standing apart from it.
   plate: 0x6a5a94,
+  // A pale, glassy blue -- reads as "clear plastic cover," and stays
+  // clearly distinct from both the plate it sits on (purple) and the
+  // Inheco ODTC's own separate door-lid mesh (near-black, 0x2c2f36 --
+  // see scene-builder.js's own thermocycler-lid comment; that's a
+  // completely different thing, the instrument's own opening mechanism,
+  // not a labware resource at all). A real, standalone Lid resource
+  // (pylabrobot.resources.lid.Lid) moved by the CoRe gripper just like
+  // any other resource -- see gantry.js's CarriedPlate, which is
+  // resource-type-agnostic.
+  lid: 0xbfe3ef,
   well: 0x59c9a5,
   tip_spot: 0x8a8f98,
   trash: 0x8a3d3d,
@@ -124,6 +134,7 @@ export const LEGEND_ENTRIES = [
   ["Tip (<=300uL)", 0xffd54f],
   ["Tip (<=1000uL)", 0xffffff],
   ["Plate", 0x6a5a94],
+  ["Lid", 0xbfe3ef],
   ["Well (fill level)", 0x59c9a5],
   ["Trash", 0x8a3d3d],
   ["Gantry channel", 0xe0b23d],

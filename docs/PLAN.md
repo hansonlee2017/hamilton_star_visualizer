@@ -3348,6 +3348,104 @@ clip into each other.
       (per user direction; confirmed live: a fresh `Channel`'s own
       `body.geometry.parameters.radiusTop * 2` reads `9`).
 
+## Review round 43
+
+User-requested new demo: a full, six-step PCR setup, combining every
+mechanism this project has built so far for the first time in one script
+-- (1) fill 96 wells with reagent from a reservoir (the same 8-channel
+batched-transfer shape `normalization_demo.py` already established), (2)
+cap the plate with its own lid via the CoRe gripper, (3) open the ODTC's
+door and load the capped plate, (4) close the door and run a real
+thermal-cycling protocol, (5) open the door and unload the capped plate,
+(6) uncap it, returning the lid to its own site.
+
+- [x] **Researched PyLabRobot's real `Lid`/`Liddable` mechanics** (see
+      `pylabrobot.resources.lid`) before writing anything: a `Lid` is a
+      standalone `Resource`, moved with the ordinary gripper API
+      (`LiquidHandler.move_lid()`, a thin wrapper over `move_resource()`
+      -- no new visualizer-side API needed at all) and seated as a real
+      child of whatever `Liddable` (a `Plate`/`Container`) it lands on.
+      `drop_resource()`'s own `Liddable`-and-`Lid` branch resolves the
+      seated position (centered, sunk by the lid's own `nesting_z_height`)
+      *before* it ever reaches `VisualizerBackend`/`events.py` -- meaning
+      the existing `resource_drop_point()`/`_relocated_point()` machinery
+      (built for plain plate drops, see "Review round 41") already
+      produces the exact right point for a lid landing on a plate, with
+      zero backend changes.
+- [x] **Confirmed, and deliberately worked around, one real architectural
+      gap**: once a lid is seated, moving *only* the plate it's on (e.g.
+      onto the ODTC) correctly carries the lid along for free in
+      PyLabRobot's own data model (the lid's absolute position is purely
+      relative to its parent plate) -- matching reality (a capped
+      microplate is picked up and carried by its own edges, the lid
+      riding along by friction, not a separate grip). This project's own
+      visualizer, though, only ever animates a resource when it actually
+      receives an "op" event naming it -- there's no "this resource rides
+      along whenever *that other* resource moves" mechanism (and adding
+      one would need the backend to know the *original*, unresolved
+      `to=` destination resource, which `ResourceDrop` itself doesn't
+      carry -- confirmed by reading `drop_resource()`'s full source: the
+      destination is fully resolved to a bare `Coordinate` before the
+      dataclass is even constructed). Worked around at the demo-script
+      level instead of adding new plumbing: right after each of the two
+      "move the capped plate" calls, the script makes one further,
+      otherwise-redundant `move_lid(plate.lid, plate, use_arm="core")`
+      call -- a genuine, valid PyLabRobot pick-up/put-down of the
+      already-seated lid back onto the exact same plate (confirmed this
+      doesn't error or disturb the resource tree: `drop_resource()`
+      always does a full `unassign()` + `assign_child_resource()` re-seat
+      regardless of whether the destination is the lid's current parent).
+      Its only purpose is giving the frontend an actual event to animate
+      the lid visibly traveling along with the plate, instead of sitting
+      motionless at the plate's old site. `return_core_gripper=False` on
+      every leg of a capped-plate move except the very last keeps the
+      same two channels attached throughout, rather than pointlessly
+      returning and re-attaching the pads between the plate's own move
+      and the lid's immediately-following re-seat.
+- [x] **New demo, `examples/pcr_setup_demo.py`**: uses a real PCR plate
+      (`azenta_96_wellplate_200uL_Vb_4titudeframestar` -- V-bottom wells,
+      rigid frame for thermal cycling, per user direction, correcting an
+      initial draft that reused the flat-bottom
+      `cor_96_wellplate_360uL_Fb` every other demo in this repo already
+      uses) rather than a general-purpose plate. It has no lid of its own
+      in PyLabRobot (`lid=None` unconditionally, no `with_lid` param at
+      all); `cor_96_wellplate_360uL_Fb_lid`'s own footprint (127.76 x
+      85.48mm) happens to match this plate's exactly (confirmed live), so
+      it's reused rather than hand-built from scratch, per user
+      direction ("If not, we can model the lid using
+      cor_96_wellplate_360uL_Fb_Lid") -- its `nesting_z_height` (7.6mm,
+      measured against the Corning plate's 14.2mm height, not this
+      plate's 16.1mm) is a documented approximation, not a claim about
+      the real Azenta-brand lid's own seated depth. New "lid" category
+      color (a pale glassy blue, `0xbfe3ef`) added to `categories.js` --
+      distinct from both a plain plate (purple) and the ODTC's own
+      separate door-lid mesh (near-black, an unrelated visualizer-only
+      glyph, not a real PyLabRobot resource at all).
+- [x] **Zero backend/frontend code changes were needed for the CoRe-
+      gripper or thermocycler mechanics themselves** -- every piece
+      (`CarriedPlate`, gripper pad glyphs, `resolveChannelYs()`-based
+      idle-channel dragging, thermocycler open/close/run) is resource-
+      type-agnostic already, confirmed by moving a `Lid` through the
+      exact same code path a `Plate` uses with no special-casing
+      anywhere. The only new code is the demo script itself, plus the one
+      cosmetic category color.
+- [x] Verified in two passes, matching this project's own established
+      practice of backend-only checks before a live browser run: (1) a
+      standalone script driving the real `VisualizerBackend` against a
+      fake server through the full six-step sequence, asserting the
+      well-volume trackers (96 x 100uL), `plate.has_lid()`/`plate.parent`/
+      `lid.parent` at every transition, that the protocol actually ran,
+      and that every `core_*` event carries `back_channel`/
+      `front_channel` -- all passed, including a full re-run after
+      switching to the real Azenta PCR plate. (2) Live end-to-end:
+      dense-polled final world positions for both the plate
+      (`[284, 185.4, -71.5]`) and the lid (`[284, 186.2, -167.5]`) matched
+      the backend's own computed coordinates almost exactly, both
+      correctly parented under the flat `sceneRoot`, all 96 wells
+      confirmed at exactly 100uL, and the gripper pads confirmed returned
+      (`[]`) only once the very last (`return_core_gripper=True`) move
+      actually finished -- not before.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
