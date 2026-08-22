@@ -595,8 +595,29 @@ export const core96Head = new Core96Head();
 // else on this mechanism's own motion queue to coordinate with (see this
 // section's own header comment for why the 8 channels aren't dragged
 // along here either, at least not yet).
-function animateCore96Op(msg, onArrive) {
-  const targetZ = () => msg.z + CORE96_ENGAGE_CLEARANCE_MM;
+//
+// `msg.z` is the touched resource's own reported *top* (resource_point()'s
+// top-center anchor -- see events.py), i.e. where the *tips' own points*
+// should end up, not where the group origin (the block's bottom/the tips'
+// own wide base -- see the constructor's own comment) should be -- those
+// differ by the tips' full length, the exact same body-vs-tip-point
+// distinction animateChannelOp()'s own targetZ comment explains for a
+// single Channel. Omitting `+ tipLength` here previously put the group
+// origin (not the tips' points) at the resource's own top, so the tips'
+// points -- a real tip's ~60mm below that -- ended up buried tens of mm
+// *through* the plate/rack instead of just reaching its surface
+// (user-reported: "the tips seems to go through the well plates").
+//
+// `tipLength`: override for the pick_up_tips96 case, same reasoning as
+// animateChannelOp()'s own `tipLength` param -- the tip that matters for
+// *this* op's clearance is the one about to be grabbed
+// (`msg.tip_length_mm`), not whatever core96Head was last carrying
+// (`core96Head.tipLength`, still the *previous* pickup's value until
+// `setTips()` runs in this op's own `onArrive`). Every other op omits it
+// and falls back to `core96Head.tipLength`, since the head is still
+// carrying that same tip throughout.
+function animateCore96Op(msg, onArrive, tipLength) {
+  const targetZ = () => msg.z + CORE96_ENGAGE_CLEARANCE_MM + (tipLength ?? core96Head.tipLength);
   core96Head.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
   core96Head.enqueue({ x: msg.x, y: null, z: restZ }, scaled(X_MOVE_MS));
   core96Head.enqueue({ x: msg.x, y: msg.y, z: restZ }, scaled(Y_MOVE_MS));
@@ -681,7 +702,7 @@ export function handleOpEvent(msg) {
         // shape (`resource`/`resource_has_tip`) deliberately matches what
         // that function already expects from a single-channel op.
         for (const spot of msg.tip_spots ?? []) applyEmbeddedResourceState(spot);
-      });
+      }, msg.tip_length_mm);
       logEvent("pick_up_tips96", msg.resource ?? "");
       break;
     case "drop_tips96":

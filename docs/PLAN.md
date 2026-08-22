@@ -2743,6 +2743,43 @@ too.
       (0.25x speed again) as a noticeably longer yellow cone grid reaching
       further down toward the rack.
 
+      Third follow-up fix (same round, user-reported): "The tips seems to
+      go through the well plates, indicating the z-coordinate is too
+      low." Correct, and a direct consequence of fixing the tip length
+      right before this: `animateCore96Op()`'s `targetZ` put the *group
+      origin* (the block's own bottom face, i.e. the tips' own wide base
+      -- see the constructor's own comment) at the resource's reported top
+      plus a small clearance, with no compensation for the tips hanging
+      *below* that origin by their own length -- exactly the body-vs-
+      tip-point distinction `animateChannelOp()`'s own `targetZ` comment
+      already explains for a single `Channel`, just missed here. Once the
+      tips went from the 35.2mm placeholder to a real 59.9mm length (the
+      fix two messages up), the gap between "block origin" and "tip's own
+      point" grew enough to plainly bury the tips' points ~57mm through
+      whatever labware they were "touching" instead of stopping at its
+      surface. Fixed by adding `+ tipLength` to `targetZ`, mirroring
+      `animateChannelOp()`'s `entry.z + tipLength` exactly; `tipLength`
+      passed as an explicit override for `pick_up_tips96` specifically
+      (the *new* tip about to be grabbed, from `msg.tip_length_mm` --
+      `core96Head.tipLength` is still the *previous* pickup's value until
+      `setTips()` runs in that op's own `onArrive`), every other op
+      falling back to `core96Head.tipLength` since the head is still
+      carrying that same tip throughout -- the identical override pattern
+      `animateChannelOp()` already uses for a single channel's own
+      pick_up_tips case. Verified live with exact arithmetic, not just a
+      visual check: polled `core96Head.pos.z` every 100ms through a full
+      (0.25x-speed) run to find the deepest real descend
+      (`z=260.22, tipLength=59.9` -> tip apex world z `= 260.22 - 59.9 =
+      200.32`), independently computed the source plate's own real top
+      from its scene-graph node (`183.12 [group world y] + 14.2
+      [declared size_z] = 197.32`) `+ CORE96_ENGAGE_CLEARANCE_MM (3) =
+      200.32` -- an exact match, confirming the tips now stop precisely at
+      the intended clearance above the plate's real surface, not
+      wherever the frontend happens to render its (thin-slab-simplified)
+      mesh. Re-verified both plates' volumes still transferred correctly
+      end-to-end (`source_plate_well_A1.volume === 150`,
+      `dest_plate_well_H12.volume === 50`) with a clean console throughout.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
