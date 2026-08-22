@@ -22,16 +22,26 @@ Run it with:
 then open the printed URL (defaults to http://127.0.0.1:8765), and click
 "Start Protocol" when ready. Click "Reset" (once a run finishes) to watch
 it again with a completely fresh scene, the same "start the entire thing
-over" pattern picogreen_demo.py uses -- deliberately *not* relying on
-Replay for that: VisualizerServer caps a replayed gap between two events
-at 2 real seconds (``MAX_REPLAY_GAP`` in server.py, so a genuinely long
-real-world pause doesn't replay at 1:1 wall-clock speed), but this demo's
-own 5-second shimmer-then-open pause (see ``main()``'s
-``asyncio.sleep(5.0)``) is longer than that cap -- replaying it would fire
-``open_lid()`` while the frontend's fixed 5-second shimmer animation is
-still only 2 seconds in, undoing the very pacing fix that made the lid
-visibly open *after* cycling rather than during it. A fresh live run has
-no such cap.
+over" pattern picogreen_demo.py uses -- Replay works correctly too now
+(see below), Reset is just kept as well since it's a nice "start over"
+demo pattern in its own right.
+
+Notice this script has *no* ``asyncio.sleep()`` calls anywhere, despite
+close_lid()/run_protocol()/open_lid() needing to visibly happen one after
+another (open the lid, close it, cycle for a visible while, open it
+again) -- an earlier version of this file faked that sequencing with
+hand-placed sleeps matched to the frontend's own animation-duration
+constants, which is exactly the kind of implicit, easy-to-drift-apart
+coupling ``cherry_pick_demo.py``'s docstring already warns about for the
+liquid-handling side. As of ``frontend/animation-queue.js`` (see
+docs/PLAN.md's "Review round 37"), the thermocycler's lid-slide/shimmer
+animations are sequenced by a real per-resource queue, the same way a
+``LiquidHandler``'s channels already are -- so these three calls can fire
+back-to-back exactly like ``cherry_pick_demo.py``'s liquid-handling ops do,
+and the *frontend* is entirely responsible for pacing them out correctly,
+including under Replay (which used to desync the shimmer against a
+capped-2-second replay gap -- no longer an issue, since replayed op
+events now just *enqueue* work rather than directly timing it).
 """
 
 from __future__ import annotations
@@ -124,19 +134,11 @@ async def main() -> None:
     await server.wait_for_start()
     print("Started.")
 
-    # Unlike a LiquidHandler's channels (each with its own real-paced
-    # animation queue -- see cherry_pick_demo.py's docstring), the
-    # thermocycler's lid-slide/shimmer animations are plain fire-and-forget
-    # tweens with no queue behind them (deliberately -- see main.js's
-    # "Thermocycler: lid slide + cycling shimmer" section), so calling these
-    # back-to-back with no delay starts them all firing at once instead of
-    # playing out in sequence. Since run_protocol() completes instantly
-    # against the chatterbox backend (no real cycling time to wait on), the
-    # sleeps below are standing in for that queue by hand, matched to
-    # main.js's own THERMOCYCLER_LID_MS/THERMOCYCLER_SHIMMER_MS -- without
-    # them, open_lid()'s animation starts before the close/shimmer ones have
-    # visually finished, which reads as "the lid never opens" (user-reported:
-    # it *does* fire, just buried under/before the still-playing shimmer).
+    # No sleeps between any of these four calls -- frontend/thermocycler.js
+    # enqueues each one's animation onto this resource's own AnimationQueue,
+    # which plays them out in order at their own real durations regardless
+    # of how quickly (or slowly) these calls actually fire (see this
+    # module's own docstring).
     #
     # The lid starts *closed* by default (scene-builder.js's own initial
     # lidMesh position, baked in before any op event ever arrives -- there's
@@ -145,25 +147,23 @@ async def main() -> None:
     # in this simplified model). Opening it first, before ever closing it,
     # is what makes the *close* below an animation you can actually see --
     # closing an already-closed lid is a no-op tween (same start and end
-    # position) invisible in the browser. Without this, the only lid motion
-    # visible in the whole run was the final open, which made the shimmer
-    # look like it started *before* any lid movement at all (user-reported).
+    # position) invisible in the browser.
     print("Opening lid to load plate...")
     await tc.open_lid()
-    await asyncio.sleep(0.6)  # THERMOCYCLER_LID_MS
 
     print("Closing lid...")
     await tc.close_lid()
-    await asyncio.sleep(0.6)  # THERMOCYCLER_LID_MS
 
     print("Running protocol...")
     await tc.run_protocol(PCR_PROTOCOL, block_max_volume=25.0)
-    await asyncio.sleep(5.0)  # THERMOCYCLER_SHIMMER_MS
 
     print("Opening lid...")
     await tc.open_lid()
-    await asyncio.sleep(0.6)  # THERMOCYCLER_LID_MS -- let it finish before mark_finished()
 
+    # Fires immediately, well before the queued animations above have
+    # actually finished playing -- harmless, since mark_finished() only
+    # ever toggles the HUD's Reset/Replay buttons and logs an event; it
+    # doesn't touch the scene or interrupt anything still queued.
     print("Thermocycler demo finished.")
     await server.mark_finished()
     print("Click 'Reset' in the visualizer to run again, or Ctrl+C to exit.")

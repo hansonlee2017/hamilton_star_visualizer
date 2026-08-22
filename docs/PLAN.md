@@ -2422,6 +2422,129 @@ starting -- both confirmed as proposed.
       scene (lid back to its closed default) ready for another run, with a
       clean browser console throughout.
 
+## Review round 37
+
+User-reported (again): "the lid opens before the thermal cycling animation
+finished" -- even with round 36's follow-up fix in place. Root-caused to a
+real architecture gap rather than a missed edge case: discussed with the
+user before writing any code (per their explicit request).
+
+- [x] **Diagnosed the real cause**: the Python-side `asyncio.sleep(5.0)`
+      (round 36's fix) is a hardcoded guess that only matches the frontend
+      at the HUD's default `1x` speed -- `THERMOCYCLER_SHIMMER_MS *
+      getDurationScale()` can run 2-4x longer if the speed dropdown isn't
+      at its default (a natural thing to reach for when *carefully*
+      watching whether an animation looks right), and the Python sleep has
+      no visibility into that dropdown at all. More fundamentally: unlike a
+      `LiquidHandler`'s channels, which each have a real per-channel
+      animation *queue* (`Channel.enqueue()`/`update()` in gantry.js) that
+      lets ops fire back-to-back with zero `asyncio.sleep()` calls (see
+      cherry_pick_demo.py's docstring), the thermocycler's lid-slide/
+      shimmer animations were plain fire-and-forget `requestAnimationFrame`
+      loops with no queue at all -- hand-placed sleeps were papering over a
+      missing piece of frontend architecture, not really fixing it.
+- [x] **Design discussion before implementation** (user: "Let's discuss
+      before changing any code"): laid out the gantry's existing queue
+      model vs. the thermocycler's lack of one, proposed generalizing the
+      queue into a reusable class rather than hand-rolling a third copy for
+      the CO-RE 96 head (explicitly the next round). User confirmed:
+      per-resource queues (not a global one), and specifically asked about
+      class reuse for the 96-head. Also flagged, correctly, that the 96-head
+      and the 8-channel head share the gantry's single X drive but have
+      independent Y/Z *and* aren't at the same X (they're mechanically
+      offset along the rail) -- see "Deferred: cross-mechanism X sharing"
+      below for how that's being carried forward, not yet implemented.
+- [x] **New `frontend/animation-queue.js`** (`AnimationQueue`, zero
+      THREE.js/DOM dependency): the generic "run tasks one at a time, tick
+      each with a raw `[0,1]` progress" primitive both other pieces below
+      build on. Deliberately applies *no* easing itself -- `motion-unit.js`
+      wants `easeInOutQuad`, `thermocycler.js`'s shimmer wants raw `t` fed
+      straight into a sine wave (easing it would distort the oscillation,
+      not just its pacing) -- baking one policy in would have been wrong
+      for the other caller.
+- [x] **New `frontend/motion-unit.js`** (`MotionUnit`, also zero THREE.js/
+      DOM dependency): the "queue of x/y/z leg tweens, with lazy
+      target/duration resolution" mechanics extracted out of gantry.js's
+      `Channel`, built on `AnimationQueue`. This is the class the CO-RE 96
+      head is meant to reuse next round -- it's mechanically simpler than a
+      multi-channel op (one rigid body, no `resolveChannelYs` row-conflict
+      math needed for the head itself), but the rise/x/y/descend/hold/
+      retract leg-tweening it needs is identical to what `Channel` already
+      does.
+- [x] **`gantry.js`'s `Channel` refactored to compose a `MotionUnit`**
+      instead of implementing its own queue -- `Channel.pos` becomes a
+      getter delegating to `this.motion.pos` (an ES getter is safe here
+      since nothing outside `Channel` ever *writes* `.pos`, only reads
+      `channels[ch].pos.y`, confirmed by grep before refactoring);
+      `enqueue()`/`update()` become thin pass-throughs. Zero behavior
+      change -- verified live (see below).
+- [x] **`thermocycler.js`'s lid-slide/shimmer now enqueue onto
+      `entry.animQueue`** (added to every `resourceIndex` entry uniformly
+      in scene-builder.js -- cheap when never used, and means a category
+      that wants sequenced animation needs no scene-builder.js changes to
+      get it) instead of starting an independent `requestAnimationFrame`
+      loop immediately. `main.js`'s render loop ticks every entry's
+      `animQueue` alongside the existing per-channel `update()` calls. This
+      is the actual fix: `close_lid()`/`run_protocol()`/`open_lid()` now
+      play out in real sequence regardless of how quickly the three calls
+      fire, and regardless of the speed dropdown (each task reads
+      `getDurationScale()` fresh when it *starts*, not when it was
+      enqueued).
+- [x] **`examples/thermocycler_demo.py`'s three `asyncio.sleep()` calls
+      deleted entirely** -- `close_lid()`/`run_protocol()`/`open_lid()` now
+      fire back-to-back exactly like a liquid-handling demo's ops already
+      do. Side effect worth noting: this also fixes Replay for this demo,
+      which round 36 had specifically steered away from (`MAX_REPLAY_GAP`
+      capping the shimmer's real gap at 2 replayed seconds) -- since
+      pacing is now owned entirely by the frontend queue instead of by
+      inter-event *timing*, a replayed event just enqueues a task the same
+      as a live one does, so the cap no longer matters. Docstring updated
+      to reflect this; the Reset loop stays too, as a fine "start over"
+      pattern in its own right.
+- [x] **17 new unit tests** (`tests/frontend/animation-queue.test.js`,
+      `motion-unit.test.js`) covering: task sequencing/one-at-a-time
+      execution, lazy `duration`-as-function resolution timing, `isIdle`,
+      `MotionUnit`'s null-stays-put/function-target.z/function-duration
+      staleness handling (the same scenarios `gantry-planning.js`'s tests
+      already cover for cross-channel planning, now covered for the
+      single-unit leg mechanics too), and confirming motion is genuinely
+      eased rather than linear. 30/30 frontend tests pass; 24/24 Python
+      tests unaffected.
+
+      Verified live: `examples/thermocycler_demo.py`'s full open/close/
+      shimmer/open sequence completed correctly end-to-end (confirmed via
+      `resourceIndex` introspection: `animQueue.isIdle === true`, lid
+      position exactly equal to `lidOpenPos`, block color exactly reverted
+      to `baseColor` after the shimmer) even with all four op calls firing
+      within the same wall-clock second (no sleeps left to space them out)
+      -- this session's browser pane wasn't actively compositing frames
+      (confirmed via a `requestAnimationFrame` probe), so the usual
+      screenshot-based verification wasn't available; correctness was
+      confirmed by manually driving `channels[i].update()`/
+      `entry.animQueue.update()` in fixed 16ms steps instead and reading
+      the resulting state directly, which does not depend on rAF actually
+      firing. Also re-ran `cherry_pick_demo.py` the same way end-to-end
+      (2000 manual frames, zero exceptions) to confirm the `Channel`/
+      `MotionUnit` refactor changed nothing: all 8 smiley-face wells landed
+      at exactly 40uL, channels ended at the trash with tips dropped, y
+      positions still correctly 9mm-spaced.
+
+**Deferred: cross-mechanism X sharing (for the CO-RE 96 head round).** The
+96-head and the 8 channels share the gantry's one physical X drive (so
+whichever one moves, the *other* needs an X-only "drag along" nudge --
+exactly generalizing `nudgeChannel()`'s existing idle-channel-dragging in
+`gantry-planning.js`'s `planGantryPasses()`) but are *not* at the same
+absolute X (mechanically offset along the rail -- user-flagged). Not
+implemented this round: `gantry-planning.js`'s `planGantryPasses()` stays
+scoped to the 8-channel group exactly as tested, since a generalized
+multi-unit-with-offset version has no second unit to verify it against yet
+and would be pure speculation about both the algorithm shape and the real
+offset value. Sketch for next round: introduce an `xOffsetMm` per gantry-
+mounted unit (0 for the channel group, a real Hamilton-derived constant for
+`Core96Head`); when a unit's op reports absolute target x, recover the
+shared carriage reference as `armX = opX - thisUnit.xOffsetMm`, then any
+*other* mounted unit's idle-drag target is `armX + thatUnit.xOffsetMm`.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

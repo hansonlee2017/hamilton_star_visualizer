@@ -13,6 +13,7 @@ import {
   EMPTY_COLOR,
   EMPTY_OPACITY,
 } from "./categories.js";
+import { AnimationQueue } from "./animation-queue.js";
 
 const ENVELOPE_PLATFORM_THICKNESS = 10;
 const THIN_CATEGORY_THICKNESS = 3;
@@ -393,6 +394,13 @@ export function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm
     node,
     baseColor: mesh ? mesh.material.color.clone() : null,
     tipPyramid,
+    // Every resource gets one, uniformly -- cheap when nothing's ever
+    // enqueued on it (main.js's render loop ticks every entry's animQueue
+    // every frame regardless of category), and means a category that wants
+    // sequenced animation (currently just "thermocycler" -- see
+    // thermocycler.js) never needs scene-builder.js's own per-category
+    // branching to know about it.
+    animQueue: new AnimationQueue(),
     // A tip_spot's own capacity, in µL -- known at scene-build time (every
     // spot in a rack holds the same tip model) and constant for this
     // spot's whole lifetime, unlike a *channel*'s carried tip (which

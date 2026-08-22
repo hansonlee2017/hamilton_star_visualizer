@@ -1,11 +1,18 @@
-// Thermocycler: lid slide + cycling shimmer. Both are plain
-// requestAnimationFrame tweens, like gantry.js's flowPulse()/Channel.pulse()
-// -- not routed through a Channel's enqueue()'d position queue, since the
-// thermocycler itself never moves; only its lid (a short, fixed slide) and
-// its block's color (a fixed-duration pulse) do. Called from gantry.js's
-// handleOpEvent() on the thermocycler_open_lid/close_lid/run_protocol op
-// events, with the resourceIndex entry passed in directly (this module
-// never touches resourceIndex itself).
+// Thermocycler: lid slide + cycling shimmer. Both are tasks enqueued onto
+// this resource's own animation-queue.js AnimationQueue (`entry.animQueue`,
+// created for every resource -- see scene-builder.js), so a close/shimmer/
+// open sequence fired back-to-back by the Python backend (no
+// asyncio.sleep() needed on that side any more -- see
+// examples/thermocycler_demo.py) plays out *in order* here instead of all
+// starting -- and overlapping -- at once. That queue is what used to be
+// missing (docs/PLAN.md's "Review round 37": these were previously plain
+// fire-and-forget requestAnimationFrame loops with no way to wait for one
+// another, which is exactly what let the lid open while the shimmer was
+// still visibly running).
+//
+// Called from gantry.js's handleOpEvent() on the thermocycler_open_lid/
+// close_lid/run_protocol op events, with the resourceIndex entry passed in
+// directly (this module never touches resourceIndex itself).
 
 import * as THREE from "three";
 import { getDurationScale } from "./duration-scale.js";
@@ -18,19 +25,25 @@ export const THERMOCYCLER_LID_MS = 600;
 // a "cycling" animation is visible at all.
 export const THERMOCYCLER_SHIMMER_MS = 5000;
 
-export function animateThermocyclerLid(entry, opening) {
+export function queueLidAnimation(entry, opening) {
   if (!entry.lidMesh || !entry.lidOpenPos || !entry.lidClosedPos) return;
-  const from = entry.lidMesh.position.clone();
+  let from;
   const to = opening ? entry.lidOpenPos : entry.lidClosedPos;
-  entry.lidOpen = opening;
-  const start = performance.now();
-  const duration = THERMOCYCLER_LID_MS * getDurationScale();
-  const step = (now) => {
-    const t = Math.min(1, (now - start) / duration);
-    entry.lidMesh.position.lerpVectors(from, to, t);
-    if (t < 1) requestAnimationFrame(step);
-  };
-  requestAnimationFrame(step);
+  entry.animQueue.enqueue({
+    // Read live, right when this task actually starts (not when it was
+    // enqueued) -- both so `from` reflects wherever the lid genuinely is
+    // once any earlier queued task has finished, and so a mid-queue speed
+    // change picks up the new getDurationScale() for whichever task hasn't
+    // started yet.
+    duration: () => THERMOCYCLER_LID_MS * getDurationScale(),
+    onStart: () => {
+      from = entry.lidMesh.position.clone();
+      entry.lidOpen = opening;
+    },
+    onTick: (t) => {
+      entry.lidMesh.position.lerpVectors(from, to, t);
+    },
+  });
 }
 
 // A warm pulsing color on the block itself -- the same "something is
@@ -38,23 +51,26 @@ export function animateThermocyclerLid(entry, opening) {
 // channel's tip, scaled to a whole-block, multi-second effect instead of
 // one leg's ~550ms.
 const THERMOCYCLER_SHIMMER_COLOR = new THREE.Color(0xffa040);
-export function animateThermocyclerShimmer(entry) {
+export function queueThermocyclerShimmer(entry) {
   if (!entry.mesh) return;
   const material = entry.mesh.material;
-  const baseColor = entry.baseColor.clone();
-  const start = performance.now();
-  const duration = THERMOCYCLER_SHIMMER_MS * getDurationScale();
-  const step = (now) => {
-    const t = Math.min(1, (now - start) / duration);
-    // A handful of full oscillations over the whole window, not one slow
-    // fade -- reads as "actively cycling," not just "briefly highlighted."
-    const pulse = (Math.sin(t * Math.PI * 2 * 6) + 1) / 2;
-    material.color.copy(baseColor).lerp(THERMOCYCLER_SHIMMER_COLOR, pulse * 0.7);
-    if (t < 1) {
-      requestAnimationFrame(step);
-    } else {
+  let baseColor;
+  entry.animQueue.enqueue({
+    duration: () => THERMOCYCLER_SHIMMER_MS * getDurationScale(),
+    onStart: () => {
+      baseColor = entry.baseColor.clone();
+    },
+    onTick: (t) => {
+      // A handful of full oscillations over the whole window, not one slow
+      // fade -- reads as "actively cycling," not just "briefly highlighted."
+      // Raw `t` (AnimationQueue applies no easing of its own -- see that
+      // file's docstring), not eased -- easing this would distort the
+      // oscillation's pacing instead of just its overall speed.
+      const pulse = (Math.sin(t * Math.PI * 2 * 6) + 1) / 2;
+      material.color.copy(baseColor).lerp(THERMOCYCLER_SHIMMER_COLOR, pulse * 0.7);
+    },
+    onComplete: () => {
       material.color.copy(baseColor);
-    }
-  };
-  requestAnimationFrame(step);
+    },
+  });
 }

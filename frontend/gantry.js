@@ -10,10 +10,11 @@ import { mapPoint } from "./coordinates.js";
 import { tipColorForVolume, EMPTY_COLOR } from "./categories.js";
 import { TIP_PYRAMID_RADIUS, TIP_PYRAMID_HEIGHT, resourceIndex } from "./scene-builder.js";
 import { applyEmbeddedResourceState } from "./resource-state.js";
-import { animateThermocyclerLid, animateThermocyclerShimmer } from "./thermocycler.js";
+import { queueLidAnimation, queueThermocyclerShimmer } from "./thermocycler.js";
 import { getDurationScale } from "./duration-scale.js";
 import { logEvent } from "./dom.js";
 import { CHANNEL_PITCH_MM, resolveChannelYs, planGantryPasses as planGantryPassesPure } from "./gantry-planning.js";
+import { MotionUnit } from "./motion-unit.js";
 
 export { CHANNEL_PITCH_MM, resolveChannelYs };
 
@@ -81,10 +82,15 @@ export class Channel {
     // axis -- see coordinates.js's mapPoint() docstring). A plain `+index *
     // CHANNEL_Y_SPACING` here put channel 0 at the front and channel 7 at
     // the back instead -- the whole rest row was mirrored front-to-back.
-    this.pos = { x: 0, y: -index * CHANNEL_Y_SPACING, z: restZ };
+    // The leg-tweening/queue mechanics themselves live in a composed
+    // MotionUnit (see motion-unit.js) -- shared with a future Core96Head,
+    // per docs/PLAN.md's "Review round 37" design discussion -- not
+    // reimplemented here.
+    this.motion = new MotionUnit(
+      { x: 0, y: -index * CHANNEL_Y_SPACING, z: restZ },
+      () => this.applyPosition()
+    );
     this.hasTip = false;
-    this.queue = [];
-    this.current = null;
 
     this.group = new THREE.Group();
 
@@ -127,6 +133,14 @@ export class Channel {
 
     gantryGroup.add(this.group);
     this.applyPosition();
+  }
+
+  // Delegates to the composed MotionUnit -- external readers (e.g.
+  // gantry-planning.js's planGantryPasses(), reading `channels[ch].pos.y`)
+  // keep working unchanged; nothing outside this class ever *writes*
+  // `.pos` (the MotionUnit owns that), so a getter-only property is safe.
+  get pos() {
+    return this.motion.pos;
   }
 
   applyPosition() {
@@ -188,12 +202,6 @@ export class Channel {
     requestAnimationFrame(step);
   }
 
-  // `onComplete`, if given, fires exactly when *this* waypoint's tween
-  // finishes -- not a fixed wall-clock delay from when it was queued. That
-  // distinction matters once the queue backs up (events arriving faster
-  // than their ~1.6s animation takes to play out, which happens routinely):
-  // a fixed-delay timer drifts out of sync with where the channel actually
-  // visually is, while this fires exactly on arrival regardless of backup.
   // `target.x`/`target.y`/`target.z` may each be `null`, meaning "stay at
   // whatever this leg actually starts from on that axis" -- used for the
   // rise-to-safe-height leg (x/y must not move horizontally) and for
@@ -203,68 +211,18 @@ export class Channel {
   // animateChannelOp()) or `(from) => number` (a rise/retract leg's
   // traverse-height target, which needs to know where *this* leg is
   // actually starting from -- see traverseLegZ()'s docstring for why).
-  // None of these can just be resolved to a value
-  // at enqueue time: since ops routinely arrive faster than their ~1.6s
-  // animation plays out, the queue backs up, and a value captured now can
-  // be stale by the time this leg actually starts -- e.g. still the
-  // channel's *initial* position before it ever moved, or (for z) the
-  // *previous* tip's length because the pick_up_tips op that updates
-  // ch.tipLength for the *current* tip hasn't had its own animation reach
-  // that point yet. Resolving both lazily, right when the leg starts in
-  // update(), sidesteps that: by then, this channel's queue is strictly
-  // FIFO, so anything enqueued earlier (including a preceding
-  // pick_up_tips's onArrive) is guaranteed to have already run.
   // `duration` may also be a function (`(from, target) => number`), same
-  // reasoning as `target.z` just above -- see animateChannelOp()'s
-  // traverseHeightMm/endHeightMm handling for a leg whose duration depends
-  // on values (this op's own tip length) that aren't safe to read until
-  // the leg actually starts either.
+  // staleness reasoning -- see animateChannelOp()'s traverseHeightMm/
+  // endHeightMm handling. All the actual lazy-resolution/queueing/easing
+  // mechanics live in the composed MotionUnit now (motion-unit.js) -- this
+  // is just a same-shaped pass-through, kept so every call site elsewhere
+  // in this file doesn't need to know a Channel is secretly a MotionUnit.
   enqueue(target, duration, onComplete) {
-    this.queue.push({ target, duration, onComplete });
+    this.motion.enqueue(target, duration, onComplete);
   }
 
   update(dtMs) {
-    if (!this.current) {
-      this.current = this.queue.shift();
-      if (this.current) {
-        this.current.elapsed = 0;
-        this.current.from = { ...this.pos };
-        if (this.current.target.x === null) this.current.target.x = this.current.from.x;
-        if (this.current.target.y === null) this.current.target.y = this.current.from.y;
-        if (this.current.target.z === null) this.current.target.z = this.current.from.z;
-        // Passed `this.current.from` -- see traverseLegZ()'s docstring for
-        // why a rise leg's target needs to know where this leg is actually
-        // starting from, not just resolve to a value at enqueue time.
-        if (typeof this.current.target.z === "function") {
-          this.current.target.z = this.current.target.z(this.current.from);
-        }
-        // Resolved after target.z above, not before -- a duration function
-        // can use the now-numeric target/from to compute its own span.
-        if (typeof this.current.duration === "function") {
-          this.current.duration = this.current.duration(this.current.from, this.current.target);
-        }
-      }
-    }
-    if (!this.current) return;
-
-    this.current.elapsed += dtMs;
-    const t = Math.min(1, this.current.elapsed / this.current.duration);
-    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
-    const { from, target } = this.current;
-    this.pos = {
-      x: THREE.MathUtils.lerp(from.x, target.x, ease),
-      y: THREE.MathUtils.lerp(from.y, target.y, ease),
-      z: THREE.MathUtils.lerp(from.z, target.z, ease),
-    };
-    this.applyPosition();
-
-    if (t >= 1) {
-      this.pos = { ...target };
-      this.applyPosition();
-      const { onComplete } = this.current;
-      this.current = null;
-      if (onComplete) onComplete();
-    }
+    this.motion.update(dtMs);
   }
 }
 
@@ -529,7 +487,7 @@ export function handleOpEvent(msg) {
     case "thermocycler_open_lid":
     case "thermocycler_close_lid": {
       const entry = resourceIndex.get(msg.resource);
-      if (entry) animateThermocyclerLid(entry, msg.op === "thermocycler_open_lid");
+      if (entry) queueLidAnimation(entry, msg.op === "thermocycler_open_lid");
       logEvent(msg.op, msg.resource ?? "");
       break;
     }
@@ -537,7 +495,7 @@ export function handleOpEvent(msg) {
       const entry = resourceIndex.get(msg.resource);
       if (entry) {
         entry.protocolSummary = msg.protocol_summary;
-        animateThermocyclerShimmer(entry);
+        queueThermocyclerShimmer(entry);
       }
       logEvent(msg.op, `${msg.resource}: ${msg.protocol_summary ?? ""}`);
       break;

@@ -148,6 +148,12 @@ function animate(now) {
   const dt = now - lastTime;
   lastTime = now;
   for (const ch of channels) ch.update(dt);
+  // Every resource's own AnimationQueue (currently only ever populated for
+  // "thermocycler" -- see thermocycler.js) -- one uniform loop rather than
+  // per-category wiring here, so a future category that wants sequenced
+  // animation just starts enqueuing onto its own entry.animQueue with no
+  // main.js change needed.
+  for (const entry of resourceIndex.values()) entry.animQueue.update(dt);
   controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
