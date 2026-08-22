@@ -118,4 +118,5 @@ export const LEGEND_ENTRIES = [
   ["Trash", 0x8a3d3d],
   ["Gantry channel", 0xe0b23d],
   ["Thermocycler", 0x8a5a3d],
+  ["CO-RE 96 head", 0x4fa8c9],
 ];

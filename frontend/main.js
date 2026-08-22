@@ -13,8 +13,8 @@
 //   scene-builder.js  -- scene graph -> Three.js object construction
 //   resource-state.js -- live tip/volume/protocol-summary state updates
 //   thermocycler.js   -- lid-slide + cycling-shimmer animation
-//   gantry.js         -- the 8-channel arm model, motion planning, and the
-//                        "op" event dispatcher
+//   gantry.js         -- the 8-channel arm model, the CO-RE 96 head, motion
+//                        planning, and the "op" event dispatcher
 //   dom.js            -- DOM handles, event log, HUD wiring
 //   websocket.js       -- the websocket connection itself
 //   tooltip.js        -- hover tooltips
@@ -27,6 +27,7 @@ import {
   gantryGroup,
   NUM_CHANNELS_DEFAULT,
   channels,
+  core96Head,
   ensureChannels,
   handleOpEvent,
   setRestZ,
@@ -167,6 +168,7 @@ function animate(now) {
   const dt = Math.min(now - lastTime, MAX_FRAME_DT_MS);
   lastTime = now;
   for (const ch of channels) ch.update(dt);
+  core96Head.update(dt);
   // Every resource's own AnimationQueue (currently only ever populated for
   // "thermocycler" -- see thermocycler.js) -- one uniform loop rather than
   // per-category wiring here, so a future category that wants sequenced
@@ -198,6 +200,7 @@ window.__viz = {
   resourceIndex,
   controls,
   container,
+  core96Head,
   frustumHalfHeight: () => frustumHalfHeight,
   get channels() {
     return channels;

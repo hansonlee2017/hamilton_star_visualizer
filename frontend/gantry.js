@@ -7,7 +7,7 @@
 
 import * as THREE from "three";
 import { mapPoint } from "./coordinates.js";
-import { tipColorForVolume, EMPTY_COLOR } from "./categories.js";
+import { tipColorForVolume, EMPTY_COLOR, EMPTY_OPACITY, FULL_OPACITY } from "./categories.js";
 import { TIP_PYRAMID_RADIUS, TIP_PYRAMID_HEIGHT, resourceIndex } from "./scene-builder.js";
 import { applyEmbeddedResourceState } from "./resource-state.js";
 import { queueLidAnimation, queueThermocyclerShimmer } from "./thermocycler.js";
@@ -435,6 +435,122 @@ function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor, traverseHe
   }
 }
 
+// ---------------------------------------------------------------------------
+// CO-RE 96 head
+// ---------------------------------------------------------------------------
+// A single rigid block that engages an entire 96-well plate/rack at once
+// (pick_up_tips96/aspirate96/dispense96/drop_tips96), as opposed to the 8
+// individual Channels above, which each act on one well/tip at a time.
+// Reuses motion-unit.js's MotionUnit for its own rise/x/y/descend/hold/
+// retract leg motion -- the same class, and the same leg pattern,
+// Channel itself now composes (see docs/PLAN.md's "Review round 37"
+// design discussion for why that split exists, and "Review round 39" for
+// this actually using it).
+//
+// Deliberately *not* coordinated with the 8 channels' own shared-X gantry
+// stops (planGantryPasses()) -- they're mechanically on the same physical
+// X drive on a real Hamilton STAR but sit at different absolute X
+// (offset along the rail), and the two are never actually used
+// concurrently in any protocol this repo runs -- see docs/PLAN.md's
+// "Review round 37" "Deferred: cross-mechanism X sharing" note for the
+// sketch of how to add that once it's actually needed.
+
+// Every labware the head ever engages -- tip racks, well plates, troughs
+// -- shares the same SBS/ANSI microplate footprint, so a single fixed
+// size (not resized per op) is both simpler and accurate enough; same
+// reasoning as scene-builder.js's thermocycler lid being sized off the
+// real plate footprint rather than the housing it happens to be on.
+const CORE96_SIZE_X_MM = 127.76;
+const CORE96_SIZE_Y_MM = 85.48;
+const CORE96_HEIGHT_MM = 30; // visual thickness only -- not a real spec, just enough to read as a rigid block
+// A few mm of clearance above the target resource's own reported top
+// (resource_point()'s top-center anchor -- see events.py) so the block's
+// bottom face doesn't z-fight with the labware mesh directly below it
+// when "descended" -- the same kind of small fixed margin
+// scene-builder.js's thermocycler lid uses around the real plate.
+const CORE96_ENGAGE_CLEARANCE_MM = 3;
+const CORE96_EMPTY_COLOR = 0x4fa8c9;
+// Parked position when nothing's queued -- off to one side so it doesn't
+// sit in the middle of a deck screenshot when unused. Not a real
+// Hamilton home-position value (this project doesn't model the 96-head's
+// own parking mechanism), just a reasonable out-of-the-way constant.
+const CORE96_REST_X_MM = 60;
+const CORE96_REST_Y_MM = 40;
+
+class Core96Head {
+  constructor() {
+    this.motion = new MotionUnit(
+      { x: CORE96_REST_X_MM, y: CORE96_REST_Y_MM, z: restZ },
+      () => this.applyPosition()
+    );
+    this.hasTips = false;
+
+    this.group = new THREE.Group();
+    const geometry = new THREE.BoxGeometry(CORE96_SIZE_X_MM, CORE96_HEIGHT_MM, CORE96_SIZE_Y_MM);
+    this.body = new THREE.Mesh(
+      geometry,
+      new THREE.MeshLambertMaterial({ color: CORE96_EMPTY_COLOR, transparent: true, opacity: EMPTY_OPACITY })
+    );
+    // Group origin is the block's own *bottom* engaging face (matching
+    // `pos.z`'s meaning as "where the head touches down"), so the body
+    // extends upward from there -- no per-tip length math needed, unlike
+    // Channel's tip glyph, since there's no single "tip point" concept for
+    // a whole rigid block.
+    this.body.position.y = CORE96_HEIGHT_MM / 2;
+    this.group.add(this.body);
+
+    gantryGroup.add(this.group);
+    this.applyPosition();
+  }
+
+  get pos() {
+    return this.motion.pos;
+  }
+
+  applyPosition() {
+    const p = mapPoint(this.pos.x, this.pos.y, this.pos.z);
+    this.group.position.copy(p);
+  }
+
+  // Only opacity distinguishes tip-presence (no hue change, unlike a
+  // single Channel's capacity-colored tip) -- there's no one "this head's
+  // tip capacity" the way a Channel's tipColorForVolume() has one, since
+  // pick_up_tips96 doesn't currently thread a representative tip's own
+  // volume through (see visualizer_backend.py's pick_up_tips96 -- would be
+  // a reasonable future addition, mirroring channel_ops_event()'s
+  // tip_max_volume_ul, not needed for a first version of this).
+  setTips(present) {
+    this.hasTips = present;
+    this.body.material.opacity = present ? FULL_OPACITY : EMPTY_OPACITY;
+  }
+
+  enqueue(target, duration, onComplete) {
+    this.motion.enqueue(target, duration, onComplete);
+  }
+
+  update(dtMs) {
+    this.motion.update(dtMs);
+  }
+}
+
+export const core96Head = new Core96Head();
+
+// Same six-leg rise/x/y/descend/hold/retract shape as animateChannelOp(),
+// just for one rigid body instead of one channel among eight -- no
+// planGantryPasses()/idle-channel dragging needed, since there's nothing
+// else on this mechanism's own motion queue to coordinate with (see this
+// section's own header comment for why the 8 channels aren't dragged
+// along here either, at least not yet).
+function animateCore96Op(msg, onArrive) {
+  const targetZ = () => msg.z + CORE96_ENGAGE_CLEARANCE_MM;
+  core96Head.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
+  core96Head.enqueue({ x: msg.x, y: null, z: restZ }, scaled(X_MOVE_MS));
+  core96Head.enqueue({ x: msg.x, y: msg.y, z: restZ }, scaled(Y_MOVE_MS));
+  core96Head.enqueue({ x: msg.x, y: msg.y, z: targetZ }, scaled(DESCEND_MS), onArrive);
+  core96Head.enqueue({ x: msg.x, y: msg.y, z: targetZ }, scaled(HOLD_MS));
+  core96Head.enqueue({ x: msg.x, y: msg.y, z: restZ }, scaled(RETRACT_MS));
+}
+
 export function handleOpEvent(msg) {
   switch (msg.op) {
     case "pick_up_tips":
@@ -500,10 +616,45 @@ export function handleOpEvent(msg) {
       logEvent(msg.op, `${msg.resource}: ${msg.protocol_summary ?? ""}`);
       break;
     }
+    case "pick_up_tips96":
+      animateCore96Op(msg, () => {
+        core96Head.setTips(true);
+        // Every one of the rack's 96 spots empties at once -- see
+        // visualizer_backend.py's pick_up_tips96 for why this needs no
+        // tracker read, same reasoning channel_ops_event() uses for a
+        // single-channel pickup. Reuses applyEmbeddedResourceState()
+        // (resource-state.js) verbatim, one call per spot -- the per-item
+        // shape (`resource`/`resource_has_tip`) deliberately matches what
+        // that function already expects from a single-channel op.
+        for (const spot of msg.tip_spots ?? []) applyEmbeddedResourceState(spot);
+      });
+      logEvent("pick_up_tips96", msg.resource ?? "");
+      break;
+    case "drop_tips96":
+      animateCore96Op(msg, () => {
+        core96Head.setTips(false);
+        for (const spot of msg.tip_spots ?? []) applyEmbeddedResourceState(spot);
+      });
+      logEvent("drop_tips96", msg.resource ?? "");
+      break;
+    case "aspirate96":
+    case "dispense96": {
+      animateCore96Op(msg, () => {
+        // Same reuse as the tip-spot case above, one call per well --
+        // visualizer_backend.py's _well_volume_entries() builds these with
+        // field names matching a single-channel aspirate/dispense's own
+        // embedded resource_volume/resource_max_volume specifically so
+        // this needs no separate per-well handling here.
+        for (const well of msg.wells ?? []) applyEmbeddedResourceState(well);
+        flashResource(msg.resource);
+      });
+      logEvent(msg.op, `${msg.resource} (${msg.volume}µL)`);
+      break;
+    }
     default:
-      // 96-head / resource-move / manual-jog events: not animated in v1, but
-      // still worth surfacing in the log so the panel reflects everything
-      // the backend did.
+      // resource-move / manual-jog events: not animated in v1, but still
+      // worth surfacing in the log so the panel reflects everything the
+      // backend did.
       logEvent(msg.op, msg.resource ?? "");
   }
 }

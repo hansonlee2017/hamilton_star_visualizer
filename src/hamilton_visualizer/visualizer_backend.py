@@ -33,12 +33,38 @@ from pylabrobot.liquid_handling.standard import (
   SingleChannelAspiration,
   SingleChannelDispense,
 )
-from pylabrobot.resources import Deck, Tip, set_tip_tracking, set_volume_tracking
+from pylabrobot.resources import Deck, Tip, TipRack, set_tip_tracking, set_volume_tracking
 from pylabrobot.resources.tip_tracker import TipTracker
 
 from hamilton_visualizer.events import channel_ops_event, resource_event
 from hamilton_visualizer.scene import build_scene
 from hamilton_visualizer.server import VisualizerServer
+
+
+def _well_volume_entries(wells: List[Any]) -> List[Dict[str, Any]]:
+  """Per-well ``{resource, resource_volume, resource_max_volume}`` entries
+  for a 96-head aspirate96/dispense96 event -- field names deliberately
+  match ``channel_ops_event()``'s own embedded per-channel shape (see
+  events.py) so the frontend's existing ``applyEmbeddedResourceState()``
+  can be reused verbatim per well, one call per entry, instead of a second
+  parallel implementation of the same volume-tracker-reading logic.
+
+  Same ``pending_volume`` reasoning as ``channel_ops_event()``: called
+  after the inner backend call already succeeded, but ``LiquidHandler``
+  queues each well's tracker change before calling the backend and only
+  commits it (syncing ``volume`` from ``pending_volume``) afterwards --
+  we're still inside that window here.
+  """
+
+  entries: List[Dict[str, Any]] = []
+  for well in wells:
+    entry: Dict[str, Any] = {"resource": well.name}
+    tracker = getattr(well, "tracker", None)
+    if tracker is not None and hasattr(tracker, "pending_volume"):
+      entry["resource_volume"] = tracker.pending_volume
+      entry["resource_max_volume"] = getattr(well, "max_volume", None)
+    entries.append(entry)
+  return entries
 
 
 class VisualizerBackend(LiquidHandlerBackend):
@@ -251,14 +277,32 @@ class VisualizerBackend(LiquidHandlerBackend):
     self._sync_state_cache(event)
     await self._server.broadcast(event)
 
-  # -- 96 head (forwarded for interface completeness; not animated in v1) --
+  # -- 96 head (see frontend/gantry.js's Core96Head -- docs/PLAN.md's
+  # "Review round 39") --
   async def pick_up_tips96(self, pickup: PickupTipRack, **backend_kwargs) -> None:
     await self._inner.pick_up_tips96(pickup, **backend_kwargs)
-    await self._server.broadcast(resource_event("pick_up_tips96", pickup.resource, offset=pickup.offset))
+    event = resource_event("pick_up_tips96", pickup.resource, offset=pickup.offset)
+    # No tracker read needed, same reasoning as channel_ops_event()'s own
+    # resource_has_tip: a successful pick_up_tips96 always empties every
+    # one of the rack's 96 spots (whether a given spot actually had a tip
+    # or was already empty, it's empty either way afterward) -- if it
+    # failed, we wouldn't have reached this line.
+    event["tip_spots"] = [
+      {"resource": spot.name, "resource_has_tip": False} for spot in pickup.resource.get_all_items()
+    ]
+    await self._server.broadcast(event)
 
   async def drop_tips96(self, drop: DropTipRack, **backend_kwargs) -> None:
     await self._inner.drop_tips96(drop, **backend_kwargs)
-    await self._server.broadcast(resource_event("drop_tips96", drop.resource, offset=drop.offset))
+    event = resource_event("drop_tips96", drop.resource, offset=drop.offset)
+    # Only meaningful when dropping back onto a TipRack (a Trash has no
+    # individual spots to visually refill) -- same "successful op has a
+    # deterministic end state" reasoning as pick_up_tips96 above.
+    if isinstance(drop.resource, TipRack):
+      event["tip_spots"] = [
+        {"resource": spot.name, "resource_has_tip": True} for spot in drop.resource.get_all_items()
+      ]
+    await self._server.broadcast(event)
 
   async def aspirate96(
     self, aspiration: Union[MultiHeadAspirationPlate, MultiHeadAspirationContainer]
@@ -269,9 +313,10 @@ class VisualizerBackend(LiquidHandlerBackend):
       if isinstance(aspiration, MultiHeadAspirationPlate)
       else aspiration.container
     )
-    await self._server.broadcast(
-      resource_event("aspirate96", resource, offset=aspiration.offset, volume=aspiration.volume)
-    )
+    event = resource_event("aspirate96", resource, offset=aspiration.offset, volume=aspiration.volume)
+    if isinstance(aspiration, MultiHeadAspirationPlate):
+      event["wells"] = _well_volume_entries(aspiration.wells)
+    await self._server.broadcast(event)
 
   async def dispense96(
     self, dispense: Union[MultiHeadDispensePlate, MultiHeadDispenseContainer]
@@ -282,9 +327,10 @@ class VisualizerBackend(LiquidHandlerBackend):
       if isinstance(dispense, MultiHeadDispensePlate)
       else dispense.container
     )
-    await self._server.broadcast(
-      resource_event("dispense96", resource, offset=dispense.offset, volume=dispense.volume)
-    )
+    event = resource_event("dispense96", resource, offset=dispense.offset, volume=dispense.volume)
+    if isinstance(dispense, MultiHeadDispensePlate):
+      event["wells"] = _well_volume_entries(dispense.wells)
+    await self._server.broadcast(event)
 
   # -- resource movement (moving plates is out of scope for v1 animation; --
   # -- forwarded and logged so the event log panel still shows it) --------

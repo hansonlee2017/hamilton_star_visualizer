@@ -114,6 +114,18 @@ examples/normalization_demo.py     normalization-protocol demo: dilutes a 96-wel
                                     to flag/skip a well) lives in
                                     src/hamilton_visualizer/normalization.py, a small
                                     PyLabRobot-free module unit-tested in tests/
+examples/thermocycler_demo.py      Inheco on-deck thermal cycler demo: opens the lid to load
+                                    a plate, closes it, runs a real 3-stage/32-cycle PCR
+                                    protocol (a fixed-duration shimmer stands in for real
+                                    cycling time), opens it again -- exercises
+                                    VisualizerThermocyclerBackend on its own, no liquid
+                                    handling
+examples/core96_demo.py            CO-RE 96 head demo: picks up all 96 tips from a full rack
+                                    at once, aspirates from every well of a source plate
+                                    simultaneously, dispenses into a destination plate, drops
+                                    tips back onto the rack -- exercises the 96-head
+                                    (pick_up_tips96/aspirate96/dispense96/drop_tips96) on its
+                                    own, independent of and coexisting with the 8-channel side
 ```
 
 ## Development

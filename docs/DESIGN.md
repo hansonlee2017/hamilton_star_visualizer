@@ -170,7 +170,7 @@ HamiltonVisualizer/
 │   ├── resource-state.js   # live tip/volume/protocol-summary updates
 │   ├── thermocycler.js     # lid-slide + cycling-shimmer animation
 │   ├── gantry-planning.js  # pure motion-planning math (unit-tested, see tests/frontend/)
-│   ├── gantry.js           # the 8-channel arm model + "op" event dispatch
+│   ├── gantry.js           # 8-channel arm + CO-RE 96 head + "op" dispatch
 │   ├── dom.js              # DOM handles, event log, HUD wiring
 │   ├── websocket.js        # the websocket connection itself
 │   ├── tooltip.js          # hover tooltips

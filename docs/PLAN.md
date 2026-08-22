@@ -2611,12 +2611,96 @@ motion-unit.test.js already covered correctly).
       correctly-paced story this round set out to produce, not the
       near-instant collapse the user reported.
 
+## Review round 39
+
+The CO-RE 96 head, the last of this round's original three-item request
+(96-head, thermocycler, bigger deck) and explicitly deferred to its own
+round back when the thermocycler work started. Landed now that
+`MotionUnit`/`AnimationQueue` exist to build it on (round 37) and the
+render-loop `dt` is clamped (round 38) so its animation paces correctly
+too.
+
+- [x] **Confirmed the backend data was already there** before writing any
+      frontend code: `VisualizerBackend.pick_up_tips96()`/`drop_tips96()`/
+      `aspirate96()`/`dispense96()` already broadcast a real absolute
+      x/y/z target via `events.py`'s `resource_event()`/`resource_point()`
+      (the touched rack/plate's own top-center + offset) -- no scene.py
+      changes needed for basic motion, contrary to this round's own
+      earlier speculation in the round-37 design discussion.
+- [x] **`visualizer_backend.py`'s 96-head handlers extended** to embed
+      per-item resource state, reusing existing shapes rather than
+      inventing new ones: `pick_up_tips96`/`drop_tips96` embed a
+      `tip_spots: [{resource, resource_has_tip}, ...]` list (one entry per
+      of the rack's 96 spots -- no tracker read needed, same "a successful
+      op has a deterministic end state" reasoning `channel_ops_event()`
+      already uses for a single-channel pickup: every spot empties on
+      pickup, refills on drop, regardless of whether it had one before).
+      `aspirate96`/`dispense96` embed a `wells: [...]` list via a new
+      `_well_volume_entries()`helper, with field names
+      (`resource`/`resource_volume`/`resource_max_volume`) deliberately
+      matching a single-channel op's own embedded shape, so the frontend
+      can reuse `applyEmbeddedResourceState()` verbatim, once per item, with
+      no new resource-state.js code.
+- [x] **New `Core96Head` class in `gantry.js`**, composing `motion-unit.js`'s
+      `MotionUnit` for its own rise/x/y/descend/hold/retract leg motion --
+      the exact reuse the round-37 design discussion built that class for.
+      Rendered as a single rigid block sized to the SBS/ANSI microplate
+      footprint every labware it touches (tip racks, plates) already
+      shares (127.76 x 85.48mm) -- not resized per op, same reasoning
+      `scene-builder.js`'s thermocycler lid uses for its own real-footprint
+      sizing. Opacity (not hue) distinguishes tip-presence, parked at a
+      fixed out-of-the-way position when idle. Deliberately *not*
+      coordinated with the 8 channels' shared-X gantry stops
+      (`planGantryPasses()`) -- see the round-37 "Deferred: cross-mechanism
+      X sharing" note, still unimplemented and not needed by anything this
+      round exercises (the two mechanisms are never used concurrently in
+      any protocol this repo runs).
+- [x] **`handleOpEvent()` gained `pick_up_tips96`/`drop_tips96`/
+      `aspirate96`/`dispense96` cases**, each driving the block's motion via
+      a new `animateCore96Op()` (the same six-leg shape as
+      `animateChannelOp()`, minus the multi-channel pass-planning that
+      doesn't apply to one rigid body) and, on arrival, replaying whatever
+      `tip_spots`/`wells` array the backend embedded through
+      `applyEmbeddedResourceState()` -- and flashing the touched
+      plate for aspirate/dispense, reusing the existing `flashResource()`.
+- [x] **New `examples/core96_demo.py`**: picks up all 96 tips from a full
+      rack, aspirates 50uL from every well of a source plate at once,
+      dispenses into a fresh destination plate, drops tips back onto the
+      rack -- the `while True`/`wait_for_reset()` "start the entire thing
+      over" pattern established in rounds 36-38, not Replay. No individual
+      8-channel ops -- exercises the 96-head in isolation, matching
+      `thermocycler_demo.py`'s own "one mechanism per demo" scope.
+- [x] **`categories.js` gained a "CO-RE 96 head" legend entry** (a
+      distinct cyan, `0x4fa8c9`, from the single-channel amber and the
+      thermocycler's brown).
+
+      Verified live: `pick_up_tips96` -> `aspirate96(50uL)` ->
+      `dispense96(50uL)` -> `drop_tips96` all fired and animated
+      correctly with a clean browser console; `resourceIndex`
+      introspection confirmed *every* well on both plates updated
+      correctly, not just a sampled one (`source_plate_well_A1.volume ===
+      150` [200 - 50] and `source_plate_well_H12.volume === 150` --
+      opposite corners of the plate both correct; `dest_plate_well_A1`/
+      `_H12` both `=== 50`), the tip rack's spots correctly round-tripped
+      (empty after pickup, full again after drop), and `core96Head`
+      correctly returned to its idle position/state
+      (`hasTips: false`, `pos.z` back at the shared gantry `restZ`)
+      afterward. Reset produced a clean fresh scene. Re-ran
+      `cherry_pick_demo.py` (STARLetDeck, no 96-head ops at all) to confirm
+      coexistence doesn't regress the 8-channel side -- all 8 smiley wells
+      still landed at exactly 40uL, and `core96Head` correctly stayed
+      idle at its parked position/state the entire run, confirming the two
+      mechanisms are independent as designed. 30/30 frontend unit tests
+      and 24/24 Python tests unaffected (no new pure logic worth isolating
+      beyond what `motion-unit.test.js` already covers -- `Core96Head` is a
+      thin, already-tested reuse of `MotionUnit`, the same reasoning
+      `Channel` itself wasn't separately unit-tested either).
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
       scrubbing/seek UI — in-memory replay from Phase 4 covers the common
       "I missed it" / "watch that again" case within one run
-- [ ] 96-head visualization
 - [ ] iSWAP / CO-RE gripper + plate-move animation
 - [ ] Hamilton Vantage support
 - [ ] Firmware-accurate motion timing
