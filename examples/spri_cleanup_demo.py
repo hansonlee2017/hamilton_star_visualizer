@@ -19,7 +19,12 @@ and off of the magnet:
      channel's own extra couple of seconds. ``Mix`` (see
      ``pylabrobot.liquid_handling.standard``) fires on the dispense, so
      the visualizer's own cycling mix animation plays right after the
-     beads land (``frontend/gantry.js``'s ``animateChannelOp()``).
+     beads land (``frontend/gantry.js``'s ``animateChannelOp()``). Fresh
+     tips *per column* here, not once for the whole step -- per user
+     direction: mixing means the tip actually dips into that column's own
+     sample, so reusing it for the next column's own aspirate from the
+     shared bead reservoir would carry sample back into the reservoir and
+     contaminate every column drawn from it afterward.
   2. 5-minute bind incubation -- ``lh.sleep()``, not ``asyncio.sleep()``,
      see below.
   3. **Load**: the plate moves onto the Alpaqua magnetic rack.
@@ -145,9 +150,11 @@ async def main() -> None:
 
     # Eight fresh 96-tip racks -- one per liquid-handling step, per user
     # direction ("fresh tips every step"): steps 5-7's own removal/wash
-    # pairs, step 10's elution, and step 13's transfer all use the full 96
-    # spots; step 1's own rack only ever consumes 8 (a1:h1 -- see below),
-    # since that step is 8-channel, not 96-head.
+    # pairs, step 10's elution, and step 13's transfer each consume a full
+    # 96 spots in one 96-head pickup; step 1's own rack also ends up fully
+    # consumed, just 8 channels (one column) at a time, 12 times over --
+    # see that step's own comment below for why it needs a fresh 8 every
+    # column instead of one pickup for the whole step.
     tip_carrier_1 = TIP_CAR_480_A00(name="tip_carrier_1")
     tip_carrier_2 = TIP_CAR_480_A00(name="tip_carrier_2")
     tip_rack_mix = hamilton_96_tiprack_300uL_filter(name="tip_rack_mix")
@@ -221,14 +228,24 @@ async def main() -> None:
     print("Started.")
 
     # -- 1. Bind: 88uL SPRI beads mixed into every well, 8-channel -------
+    # Fresh tips *per column*, not once for the whole step, unlike
+    # pcr_setup_demo.py's own fill loop (which this was originally
+    # modeled on): that loop's tips only ever touch the *same* shared
+    # reagent, safe to reuse across columns, but Mix here means the tip
+    # actually dips into each well's own sample during the mix cycles --
+    # reusing it for the *next* column's own aspirate from the shared
+    # bead reservoir would carry that column's sample back into the
+    # reservoir, contaminating every column drawn from it afterward. Per
+    # user direction. Consumes tip_rack_mix's full 96 spots (12 columns *
+    # 8 channels), not just the 8 an earlier draft used.
     print(f"Mixing {BEAD_VOLUME_UL:g}uL of SPRI beads into every well...")
-    await lh.pick_up_tips(tip_rack_mix["A1:H1"])
     for col in range(1, 13):
       wells = pcr_plate[f"A{col}:H{col}"]
       vols = [BEAD_VOLUME_UL] * len(wells)
+      await lh.pick_up_tips(tip_rack_mix[f"A{col}:H{col}"])
       await lh.aspirate([bead_reservoir] * len(wells), vols=vols, spread="wide")
       await lh.dispense(wells, vols=vols, mix=[BEAD_MIX] * len(wells))
-    await lh.discard_tips()
+      await lh.discard_tips()
 
     print(f"Binding incubation ({BIND_INCUBATION_S // 60} min)...")
     await lh.sleep(BIND_INCUBATION_S, pcr_plate)

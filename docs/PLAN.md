@@ -4240,6 +4240,63 @@ incubation-timing policy -- see this session's plan-mode transcript):
       dedicated unit tests either, only replay-test coverage, since both
       need a THREE.js material/mesh to animate at all).
 
+**Follow-up, same round, after live review:**
+
+- [x] **Fresh tips per column during bead mixing, not once for the whole
+      step.** User-caught contamination risk: step 1's `Mix` cycles mean
+      the tip actually dips into each column's own sample; the original
+      single 8-tip pickup reused across all 12 columns would carry one
+      column's sample back into the *shared* bead reservoir on the next
+      column's own aspirate, contaminating every column drawn from it
+      afterward (`pcr_setup_demo.py`'s own fill loop, which this was
+      modeled on, is safe to reuse tips across columns only because it
+      never touches anything but the one shared reagent -- no `Mix`, no
+      dipping into a well containing something else). Fixed: `pick_up_tips`
+      /`discard_tips` now bracket each column individually (12 pickups of
+      8 spots each, consuming `tip_rack_mix`'s full 96 spots, same as
+      every other step's own full-rack consumption -- just 8 at a time
+      instead of 96 at once).
+- [x] **Reservoir-plate wells render as plain blocks, not V-bottom
+      cones.** User: a real single-well reservoir plate (e.g.
+      `nest_1_troughplate_195000uL_Vb`) actually has ~96 small divots at
+      its bottom, not one smooth V -- a shape this project was never going
+      to model in detail either way, so a block is the more *accurate*
+      simplification, not just an easier one. `scene-builder.js`'s
+      `wellShapeFor()` now keys off real-world well *size*, not just
+      `bottom_type`/`cross_section_type`: any well spanning more than
+      ~20mm (an ordinary well, even a large one, never exceeds ~12mm;
+      a reservoir spanning many nominal grid positions is 70mm+) renders
+      as a plain box regardless of its declared bottom shape. Verified an
+      ordinary small plate well is unaffected (still a cone) alongside the
+      two reservoir wells (now boxes) in the same replay-test run.
+- [x] **Event log: a "(mix)" label on aspirate/dispense entries, and the
+      real incubation length on "incubate" entries.** `logEvent()`'s own
+      `op` argument becomes `"${msg.op} (mix)"` when `mix_repetitions` is
+      present (per-channel for the 8-channel case, whole-op for
+      aspirate96/dispense96) -- exactly the same data
+      `animateChannelOp()`/`animateCore96Op()` already read to decide
+      whether to play the cycling mix animation, just also surfaced as
+      text. New `formatIncubationTime()` helper (`gantry.js`) renders
+      `msg.duration_s` as "5 min"/"90 s"/"1.5 min" for the `"incubate"`
+      case's own log line -- the real hold length the protocol asked for,
+      even though (per `VisualizerBackend.incubate()`'s own docstring) the
+      *animation* itself always plays at one fixed length regardless.
+- [x] Verified: re-captured `spri_cleanup_demo.py`'s real event stream
+      (89 op events now, 12 pick_up_tips/12 drop_tips replacing the
+      original 1/1 -- confirms the per-column tip fix), confirmed via the
+      captured JSON directly that all 12 bead dispenses carry
+      `mix_repetitions`, exactly one of the 4 `dispense96` calls (the
+      elution one) carries it, and all 7 `incubate` calls' `duration_s`
+      values match the demo's own constants exactly (300/300/1800/1800/
+      60/120/120). Re-ran the full Node replay test: all prior checks
+      still pass unchanged, plus new checks confirming both reservoir
+      wells render as `BoxGeometry` while an ordinary plate well still
+      renders as `ConeGeometry`. Live browser re-check: `dispense (mix)`
+      log entries and `incubate pcr_plate (5 min)` both confirmed reading
+      correctly in the real event log, reservoir plates visibly rendering
+      as flat blocks instead of the previous cone/cylinder shapes. Full
+      unit suite: 36/36, unchanged.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

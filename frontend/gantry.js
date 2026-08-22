@@ -1249,6 +1249,18 @@ export function handleOpEvent(msg) {
   pendingOps.push(msg);
 }
 
+// A plain, human-readable "5 min"/"90 s"/"1.5 min" for the "incubate"
+// case's own logEvent() call below -- msg.duration_s is always a whole
+// number of seconds in every demo this project ships (see
+// VisualizerBackend.incubate()'s own docstring), but this doesn't assume
+// that.
+function formatIncubationTime(seconds) {
+  if (seconds == null) return "?";
+  if (seconds % 60 === 0) return `${seconds / 60} min`;
+  if (seconds < 60) return `${seconds} s`;
+  return `${(seconds / 60).toFixed(1)} min`;
+}
+
 // The real op-event handler, previously exported directly as
 // handleOpEvent() itself -- see that function's own docstring, and
 // advanceOpQueue()'s, for why a dispatch now only ever happens once
@@ -1305,8 +1317,14 @@ function dispatchOp(msg) {
         // animateChannelOp() already treats as "use restZ, unchanged."
         { traverseHeightMm: msg.traverse_height_mm, endHeightMm: msg.end_height_mm }
       );
+      // "(mix)" appended to the op label itself -- see events.py's
+      // channel_ops_event() for where mix_repetitions comes from -- when
+      // *any* channel in this call carried a Mix, matching how
+      // animateChannelOp() itself decides whether to play the cycling
+      // mix animation (one shared "mixRepetitions" concept, just checked
+      // per-channel there and per-call here).
       logEvent(
-        msg.op,
+        msg.channels.some((c) => c.mix_repetitions) ? `${msg.op} (mix)` : msg.op,
         msg.channels.map((c) => `p${c.channel}:${c.resource} (${c.volume}µL)`).join(", ")
       );
       break;
@@ -1373,7 +1391,11 @@ function dispatchOp(msg) {
           flashResource(well.resource);
         }
       });
-      logEvent(msg.op, `${msg.resource} (${msg.volume}µL)`);
+      // "(mix)" appended the same way the per-channel aspirate/dispense
+      // case above does -- see events.py's VisualizerBackend.aspirate96()/
+      // dispense96() for where the (single, whole-op, not per-channel)
+      // mix_repetitions field comes from.
+      logEvent(msg.mix_repetitions ? `${msg.op} (mix)` : msg.op, `${msg.resource} (${msg.volume}µL)`);
       break;
     }
     case "core_pick_up_resource": {
@@ -1532,7 +1554,15 @@ function dispatchOp(msg) {
         const entry = resourceIndex.get(name);
         if (entry) queueIncubateAnimation(entry);
       }
-      logEvent("incubate", (msg.resources ?? []).join(", "));
+      // `msg.duration_s` -- the real hold length the protocol script
+      // called lh.sleep() with (see VisualizerBackend.incubate()'s own
+      // docstring for why the *animation* itself always plays at one
+      // fixed length regardless) -- worth surfacing in the log even
+      // though it's not what's actually playing out on screen, the same
+      // "log what the protocol really asked for" reasoning
+      // thermocycler_run_protocol's own protocol_summary tooltip already
+      // follows.
+      logEvent("incubate", `${(msg.resources ?? []).join(", ")} (${formatIncubationTime(msg.duration_s)})`);
       break;
     default:
       // resource-move / manual-jog events: not animated in v1, but still

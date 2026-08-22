@@ -67,8 +67,28 @@ function colorForNode(node) {
 //    well scale.
 //  - Rectangular cross-section, non-V bottom: unchanged -- the existing
 //    box (returns null; caller falls back to it).
+// A single-well "reservoir plate" (e.g. nest_1_troughplate_195000uL_Vb --
+// see examples/spri_cleanup_demo.py) reports the exact same bottom_type=
+// "V"/cross_section_type="circle" fields PyLabRobot gives any ordinary
+// small well -- there's no separate "this is a shared trough, not an
+// individual well" flag to key off of. But it's real-world unmistakably
+// bigger than an individual well ever is: an ordinary well (even a large
+// one, e.g. a 2mL deep-well tube) tops out around 12mm across, while a
+// reservoir spanning many nominal grid positions is 70mm+ (e.g. this
+// one's own ~108 x 72mm). Per user direction ("it actually has 96 divots
+// at the bottom of the plate... can we visualize the single well as a
+// block, the v-bottom can be omitted") -- a real reservoir plate's true
+// bottom geometry (many small divots, not one smooth V) isn't a shape
+// this project models either way, so a plain block is the more accurate
+// simplification, not just a simpler one.
+const RESERVOIR_WELL_MIN_SPAN_MM = 20;
+function isReservoirWell(node) {
+  return Math.max(node.size_x ?? 0, node.size_y ?? 0) > RESERVOIR_WELL_MIN_SPAN_MM;
+}
+
 function wellShapeFor(node) {
   if (node.category !== "well") return null;
+  if (isReservoirWell(node)) return null; // plain BoxGeometry, see buildResourceObject()
   if (node.bottom_type === "V") {
     // Apex-down like the tip pyramid's cone -- THREE.ConeGeometry's apex
     // points +Y by default, so flip it in buildResourceObject the same
