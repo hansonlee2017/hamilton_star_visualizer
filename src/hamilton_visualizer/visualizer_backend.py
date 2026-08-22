@@ -37,7 +37,13 @@ from pylabrobot.liquid_handling.standard import (
 from pylabrobot.resources import Deck, Tip, TipRack, set_tip_tracking, set_volume_tracking
 from pylabrobot.resources.tip_tracker import TipTracker
 
-from hamilton_visualizer.events import channel_ops_event, resource_drop_point, resource_event, resource_move_point
+from hamilton_visualizer.events import (
+  channel_ops_event,
+  resource_drop_point,
+  resource_event,
+  resource_move_point,
+  resource_point,
+)
 from hamilton_visualizer.scene import build_scene
 from hamilton_visualizer.server import VisualizerServer
 
@@ -408,6 +414,29 @@ class VisualizerBackend(LiquidHandlerBackend):
       event["wells"] = _well_volume_entries(dispense.wells)
     await self._server.broadcast(event)
 
+  def _core_grippers_point(self) -> Optional[Dict[str, float]]:
+    """Absolute top-center point of the deck's own ``core_grippers``
+    fixture (the real parked/return location for the pad-attach/return
+    leg of a ``use_arm="core"`` pickup/drop -- see ``pick_up_resource()``/
+    ``drop_resource()`` below), or ``None`` if this deck doesn't have one
+    (e.g. a non-Hamilton deck, or a Hamilton deck built with
+    ``core_grippers=None``).
+
+    ``self.deck`` (the ``LiquidHandlerBackend`` base class's own property,
+    set by ``LiquidHandler.setup()`` before any op can run) is a normal
+    ``Deck`` resource; ``core_grippers`` is just a regular named child of
+    it (parented under ``waste_block`` -- see hamilton_decks.py), not a
+    special API, so ``get_resource()`` finds it the same way any other
+    named resource would -- confirmed live: ``STARDeck().get_resource(
+    "core_grippers")`` returns the real ``HamiltonCoreGrippers`` resource.
+    """
+
+    try:
+      core_grippers = self.deck.get_resource("core_grippers")
+    except (ValueError, AssertionError):
+      return None
+    return resource_point(core_grippers)
+
   # -- resource movement ----------------------------------------------------
   # Two arms can move a resource in real PyLabRobot: the iSWAP (the
   # default -- a separate, unmodeled-in-this-project mechanism) and the
@@ -465,16 +494,24 @@ class VisualizerBackend(LiquidHandlerBackend):
     needs_attach = (back_channel, front_channel) != self._core_gripper_channels
     self._core_gripper_channels = (back_channel, front_channel)
 
-    await self._server.broadcast(
-      resource_event(
-        "core_pick_up_resource",
-        pickup.resource,
-        offset=pickup.offset,
-        back_channel=back_channel,
-        front_channel=front_channel,
-        needs_attach=needs_attach,
-      )
+    event = resource_event(
+      "core_pick_up_resource",
+      pickup.resource,
+      offset=pickup.offset,
+      back_channel=back_channel,
+      front_channel=front_channel,
+      needs_attach=needs_attach,
     )
+    if needs_attach:
+      # Where the two channels visibly travel to *grab* the pads before
+      # continuing on to the resource -- see gantry.js's own
+      # "core_pick_up_resource" handler. Only computed/sent when actually
+      # needed (an already-attached repeat pickup has no reason to know
+      # where the pads live).
+      pad_point = self._core_grippers_point()
+      if pad_point is not None:
+        event["pad_x"], event["pad_y"], event["pad_z"] = pad_point["x"], pad_point["y"], pad_point["z"]
+    await self._server.broadcast(event)
 
   async def move_picked_up_resource(self, move: ResourceMove, **backend_kwargs) -> None:
     await self._inner.move_picked_up_resource(move, **backend_kwargs)
@@ -521,17 +558,24 @@ class VisualizerBackend(LiquidHandlerBackend):
     # resource_point() -- see that function's own docstring for why a live
     # location lookup on drop.resource would be wrong here (it's still
     # parented at its *old* location at this point in the call).
-    await self._server.broadcast(
-      {
-        "type": "op",
-        "op": "core_drop_resource",
-        "resource": drop.resource.name,
-        **resource_drop_point(drop),
-        "back_channel": back_channel,
-        "front_channel": front_channel,
-        "return_core_gripper": return_core_gripper,
-      }
-    )
+    event = {
+      "type": "op",
+      "op": "core_drop_resource",
+      "resource": drop.resource.name,
+      **resource_drop_point(drop),
+      "back_channel": back_channel,
+      "front_channel": front_channel,
+      "return_core_gripper": return_core_gripper,
+    }
+    if return_core_gripper:
+      # Where the two channels visibly travel to *return* the pads after
+      # releasing the resource -- see gantry.js's own "core_drop_resource"
+      # handler. Same "only when actually needed" reasoning as the pickup
+      # side's own pad_point above.
+      pad_point = self._core_grippers_point()
+      if pad_point is not None:
+        event["pad_x"], event["pad_y"], event["pad_z"] = pad_point["x"], pad_point["y"], pad_point["z"]
+    await self._server.broadcast(event)
 
   # -- misc passthroughs ----------------------------------------------------
   async def request_tip_presence(self):

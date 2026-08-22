@@ -803,6 +803,21 @@ function animateCore96Op(msg, onArrive, tipLength) {
 // simple bounding-box animation, not a substitute for real motion
 // planning" bar events.py's resource_point() already operates at.
 const CORE_GRIP_HALF_SPAN_MM = 40;
+// How far above a resource's own reported top-center (see events.py's
+// resource_point()/resource_drop_point()/resource_move_point()) the two
+// gripping channels' own origin (where body meets pad -- see Channel's
+// padMesh) targets, so the pad glyph -- which hangs CORE_GRIPPER_PAD_
+// HEIGHT_MM *below* that origin, same as a carried tip -- ends up
+// straddling the resource's top edge instead of buried inside it (user-
+// reported: "gripper pads are not visible" -- confirmed live: with no
+// offset, the channel's own origin (and so the pad hanging below it)
+// landed *at* the resource's top surface, putting the whole pad inside
+// the resource's own mesh). Half the pad's height (so the pad visually
+// straddles the edge, not floats entirely above it) plus a couple more mm
+// of clearance so it doesn't z-fight with the resource's own top face --
+// the same small-fixed-margin idea CORE96_ENGAGE_CLEARANCE_MM/
+// scene-builder.js's thermocycler lid clearance already use.
+const CORE_GRIP_CHANNEL_Z_OFFSET_MM = CORE_GRIPPER_PAD_HEIGHT_MM / 2 + 2;
 
 // The resource currently gripped and being carried, or null -- at most one
 // at a time (a real CoRe gripper only ever holds one resource). Its own
@@ -879,31 +894,89 @@ function setGripperPadChannels(back, front) {
   }
 }
 
-// Rise/x/y/descend for the two gripper channels, straddling (x, y) by
-// +-CORE_GRIP_HALF_SPAN_MM -- same leg shape animateChannelOp() uses for a
-// single channel's approach, just for two channels moving in lockstep and
-// with no final retract leg: the channels stay descended, holding
-// whatever they're gripping, until the next core_* op (a further
-// core_move_picked_up_resource or the final core_drop_resource) drives the
-// next leg from wherever this one left off. `onArrive` fires once, off the
-// front channel's own descend completion (both channels' legs use the
+// One "stop" for the whole shared-X-rail gantry -- every one of the 8
+// channels *and* the 96-head (see CORE96_X_OFFSET_MM's own comment: same
+// physical X drive) -- used identically for every kind of stop a CoRe-
+// gripper move makes: traveling to core_grippers to attach/return the
+// pads, and traveling to grip/drop the actual resource. Rise/x/y/descend,
+// the same leg shape animateChannelOp() uses for a single channel's
+// approach; unlike that function there's no final retract leg -- whatever
+// this stop leaves descended (the two gripping channels, holding onto
+// whatever they're gripping) stays there until the *next* stop's own rise
+// leg picks it back up, exactly like animateGripperStop()'s own callers
+// chain multiple stops back to back (pad-attach -> resource-grip,
+// resource-drop -> pad-return).
+//
+// `targetYFor`/`targetZFor` are `(channelIndex) => number`, letting each
+// caller customize only the two participating channels' own Y/Z (every
+// other channel keeps its own current Y and stays at restZ, exactly
+// animateChannelGroupOp()'s own "idle channels get dragged along the
+// shared rail, not left behind" reasoning -- user-reported: gripper
+// channels "appear desync from the other pipettes... they don't move
+// together in x-axis," true before this since the other 6 channels (and
+// the 96-head) simply never got enqueued anything during a gripper move)
+// without duplicating the leg-enqueueing/cross-mechanism-dragging plumbing
+// once per kind of stop. `onArriveChannel`/`onArrive`: fired once, off
+// that one channel's own descend completion (every channel's legs use the
 // same fixed nominal durations -- see animateChannelOp()'s own "every leg
 // always takes its fixed nominal duration" reasoning -- so they land
-// within a frame of each other regardless of which one's callback fires).
-function animateGripperChannels(backChannel, frontChannel, x, y, z, onArrive) {
-  const spans = [
-    [backChannel, CORE_GRIP_HALF_SPAN_MM],
-    [frontChannel, -CORE_GRIP_HALF_SPAN_MM],
-  ];
-  for (const [idx, dy] of spans) {
-    const ch = channels[idx];
-    if (!ch) continue;
-    const targetY = y + dy;
+// within a frame of each other regardless of which channel's callback
+// actually fires).
+function animateGripperStop(x, targetYFor, targetZFor, onArriveChannel, onArrive) {
+  for (let i = 0; i < channels.length; i++) {
+    const ch = channels[i];
+    const y = targetYFor(i);
+    const z = targetZFor(i);
     ch.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
     ch.enqueue({ x, y: null, z: restZ }, scaled(X_MOVE_MS));
-    ch.enqueue({ x, y: targetY, z: restZ }, scaled(Y_MOVE_MS));
-    ch.enqueue({ x, y: targetY, z }, scaled(DESCEND_MS), idx === frontChannel ? onArrive : undefined);
+    ch.enqueue({ x, y, z: restZ }, scaled(Y_MOVE_MS));
+    ch.enqueue({ x, y, z }, scaled(DESCEND_MS), i === onArriveChannel ? onArrive : undefined);
   }
+  // The 96-head rides the same shared X rail -- converted into its own
+  // frame exactly the way nudgeCore96Head()/animateCore96Op() already do
+  // for ordinary channel ops (see CORE96_X_OFFSET_MM's own comment); no
+  // separate onArrive hook needed here, it's a pure cosmetic drag-along
+  // like every other idle passenger in this function.
+  const headX = x - CORE96_X_OFFSET_MM;
+  core96Head.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
+  core96Head.enqueue({ x: headX, y: null, z: restZ }, scaled(X_MOVE_MS));
+  core96Head.enqueue({ x: headX, y: null, z: restZ }, scaled(Y_MOVE_MS));
+  core96Head.enqueue({ x: headX, y: null, z: restZ }, scaled(DESCEND_MS));
+}
+
+// targetYFor/targetZFor for a stop where the two gripper channels
+// straddle a *resource* (the plate/rack being picked up, moved, or
+// dropped) -- back at +CORE_GRIP_HALF_SPAN_MM, front at
+// -CORE_GRIP_HALF_SPAN_MM (mirrors Channel's own back/front convention --
+// see that class's constructor comment: channel 0 is back-most, increasing
+// index moves toward front/-y), descending to the resource's own z plus
+// CORE_GRIP_CHANNEL_Z_OFFSET_MM. Every other channel keeps its own current
+// y and stays at restZ (see animateGripperStop()'s own docstring).
+function gripResourceTargets(backChannel, frontChannel, y, z) {
+  return {
+    targetYFor: (i) =>
+      i === backChannel ? y + CORE_GRIP_HALF_SPAN_MM : i === frontChannel ? y - CORE_GRIP_HALF_SPAN_MM : channels[i].pos.y,
+    targetZFor: (i) => (i === backChannel || i === frontChannel ? z + CORE_GRIP_CHANNEL_Z_OFFSET_MM : restZ),
+  };
+}
+
+// targetYFor/targetZFor for a stop at core_grippers itself (attaching or
+// returning the pads) -- both channels target the same (padY, padZ) point
+// (no straddle span the way gripResourceTargets() has: `core_grippers` is
+// a small compact fixture, not a full plate footprint to straddle across
+// -- see CORE_GRIP_HALF_SPAN_MM's own "not sourced from any real per-
+// resource grip-width calculation" comment for the same approximation
+// bar). `padZ` may be omitted (a deck without a `core_grippers` resource
+// -- see visualizer_backend.py's own `_core_grippers_point()`), in which
+// case this stop just travels in x/y at restZ rather than descending.
+function padTargets(backChannel, frontChannel, padY, padZ) {
+  return {
+    targetYFor: (i) => (i === backChannel || i === frontChannel ? padY : channels[i].pos.y),
+    targetZFor: (i) =>
+      i === backChannel || i === frontChannel
+        ? (padZ != null ? padZ + CORE_GRIP_CHANNEL_Z_OFFSET_MM : restZ)
+        : restZ,
+  };
 }
 
 // Same rise/x/y/descend shape as animateGripperChannels(), for the
@@ -1031,23 +1104,17 @@ export function handleOpEvent(msg) {
       break;
     }
     case "core_pick_up_resource": {
-      const { back_channel: back, front_channel: front, needs_attach } = msg;
-      // Simplification: pads become visible the instant the channels start
-      // their approach (not a separate prior "travel to core_grippers,
-      // grab pads" leg of their own) -- see this feature's own docs/PLAN.md
-      // write-up for why modeling that extra real leg wasn't worth the
-      // added complexity at this project's usual approximation level.
-      if (needs_attach) setGripperPadChannels(back, front);
+      const { back_channel: back, front_channel: front, needs_attach, pad_x, pad_y, pad_z } = msg;
       // Reparented and wrapped in a CarriedPlate *synchronously* here, not
-      // deferred to the channels' own onArrive -- a real websocket "op"
+      // deferred to any channel's own onArrive -- a real websocket "op"
       // message for the very next leg of this same move (a
       // core_move_picked_up_resource, or -- the common case, since
       // move_resource() only calls move_picked_up_resource for explicit
       // intermediate_locations -- straight to core_drop_resource) routinely
-      // arrives and gets handled well before this pickup's own ~1.1s
-      // approach animation actually finishes (the backend has no reason to
-      // wait between them -- see e.g. core_gripper_demo.py's own back-to-
-      // back move_plate() calls), and that next event's own
+      // arrives and gets handled well before this pickup's own approach
+      // animation actually finishes (the backend has no reason to wait
+      // between them -- see e.g. core_gripper_demo.py's own back-to-back
+      // move_plate() calls), and that next event's own
       // animateCarriedPlateTo() call needs `carriedPlate` to already exist
       // to enqueue onto (confirmed live: deferring this to onArrive left
       // `carriedPlate` still null when the very next op's handler ran,
@@ -1063,20 +1130,41 @@ export function handleOpEvent(msg) {
         gantryGroup.attach(entry.group);
         carriedPlate = new CarriedPlate(msg.resource, { x: msg.x, y: msg.y, z: msg.z });
       }
-      animateGripperChannels(back, front, msg.x, msg.y, msg.z);
+      // Pads aren't already on these channels -- a real prior leg (see
+      // STAR_backend.py's own `if self.core_parked: await self.
+      // pick_up_core_gripper_tools(...)`): travel to core_grippers first,
+      // "grab" the pads once actually there (not instantly at event
+      // receipt -- see setGripperPadChannels()'s own onArrive callback
+      // below), *then* continue to the resource. `needs_attach` without
+      // `pad_x` (a deck with no `core_grippers` resource -- see
+      // visualizer_backend.py's own `_core_grippers_point()`) falls back
+      // to the old instant toggle instead of skipping the pad glyph
+      // entirely.
+      if (needs_attach) {
+        if (pad_x != null) {
+          const pad = padTargets(back, front, pad_y, pad_z);
+          animateGripperStop(pad_x, pad.targetYFor, pad.targetZFor, front, () => setGripperPadChannels(back, front));
+        } else {
+          setGripperPadChannels(back, front);
+        }
+      }
+      const grip = gripResourceTargets(back, front, msg.y, msg.z);
+      animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
       logEvent("core_pick_up_resource", msg.resource ?? "");
       break;
     }
     case "core_move_picked_up_resource": {
       const { back_channel: back, front_channel: front } = msg;
-      animateGripperChannels(back, front, msg.x, msg.y, msg.z);
+      const grip = gripResourceTargets(back, front, msg.y, msg.z);
+      animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
       animateCarriedPlateTo(msg.x, msg.y, msg.z);
       logEvent("core_move_picked_up_resource", msg.resource ?? "");
       break;
     }
     case "core_drop_resource": {
-      const { back_channel: back, front_channel: front, return_core_gripper } = msg;
-      animateGripperChannels(back, front, msg.x, msg.y, msg.z);
+      const { back_channel: back, front_channel: front, return_core_gripper, pad_x, pad_y, pad_z } = msg;
+      const grip = gripResourceTargets(back, front, msg.y, msg.z);
+      animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
       // Enqueued while `carriedPlate` still refers to *this* resource --
       // must run before the reparent/null-out below.
       animateCarriedPlateTo(msg.x, msg.y, msg.z);
@@ -1118,7 +1206,20 @@ export function handleOpEvent(msg) {
       // other resource unconditionally overwrites `carriedPlate` with a
       // fresh instance anyway -- nothing ever reads a stale one as if it
       // were still actively gripped.
-      if (return_core_gripper) setGripperPadChannels(null, null);
+      if (return_core_gripper) {
+        // Trailing, channels-only stop (the plate has already been
+        // released above -- animateCarriedPlateTo() isn't called again):
+        // travel back to core_grippers and "return" the pads once actually
+        // there, mirroring the pickup side's own pad-attach travel. Same
+        // "no pad_x, no coordinates to travel to" fallback as the pickup
+        // side.
+        if (pad_x != null) {
+          const pad = padTargets(back, front, pad_y, pad_z);
+          animateGripperStop(pad_x, pad.targetYFor, pad.targetZFor, front, () => setGripperPadChannels(null, null));
+        } else {
+          setGripperPadChannels(null, null);
+        }
+      }
       logEvent("core_drop_resource", msg.resource ?? "");
       break;
     }

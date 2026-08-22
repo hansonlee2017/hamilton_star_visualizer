@@ -3068,6 +3068,104 @@ than hardcoding a pair.
       `gantryGroup`), and both pad glyphs correctly disappeared only after
       the final `return_core_gripper=True` drop.
 
+## Review round 42
+
+User feedback after watching `core_gripper_demo.py`: (1) the plate needs
+the ODTC's lid opened before it lands there, (2) the gripper pads aren't
+visible, (3) no animation for the pads actually attaching/returning, (4)
+the two gripping channels look desynced from the other pipettes in x, and
+(5) the plate and pipettes don't look fully synchronized either. Also
+separately noticed: the ODTC's own base block renders differently between
+this demo and `thermocycler_demo.py`.
+
+- [x] **(1) Demo bug, not a visualizer bug**: `core_gripper_demo.py` never
+      called `tc.open_lid()` before moving a plate onto the block -- a real
+      ODTC's lid has to be open first, the same precondition
+      `thermocycler_demo.py` itself demonstrates. Added.
+- [x] **(2) Pads were rendering *inside* the plate**: the two gripping
+      channels' own descend target was the resource's raw reported z (its
+      top-center, from `resource_point()`/`resource_drop_point()`/
+      `resource_move_point()`) with no clearance -- since a pad hangs
+      `CORE_GRIPPER_PAD_HEIGHT_MM` *below* the channel's own origin (the
+      same "body sits above the tip's point" geometry a carried tip has),
+      that put the whole pad buried inside the resource's own mesh. New
+      `CORE_GRIP_CHANNEL_Z_OFFSET_MM` (half the pad's height plus a couple
+      mm of clearance) lifts the channel's own target so the pad straddles
+      the resource's top edge instead.
+- [x] **(3) Real pad-attach/return travel, not an instant toggle**: the
+      backend now computes and sends the deck's own real `core_grippers`
+      fixture location (`pad_x`/`pad_y`/`pad_z`, via a new
+      `VisualizerBackend._core_grippers_point()` -- `deck.get_resource(
+      "core_grippers")` is a completely ordinary named child resource, not
+      a special API, confirmed live) on a pickup's `core_pick_up_resource`
+      event when `needs_attach` is true, and a drop's `core_drop_resource`
+      event when `return_core_gripper` is true. The frontend now chains an
+      extra "travel to core_grippers, then grab/return the pads once
+      actually arrived (not instantly at event receipt)" stop before/after
+      the real resource grip/drop stop, only when those coordinates are
+      present (falls back to the old instant toggle otherwise -- e.g. a
+      deck built with `core_grippers=None`).
+- [x] **(4)+(5) Every gripper stop now drags the whole shared-X-rail
+      gantry, not just the two gripping channels**: the old
+      `animateGripperChannels()` only ever enqueued legs for the two
+      gripping channels -- every other channel (and the 96-head, which
+      rides the same physical X drive -- see `CORE96_X_OFFSET_MM`) simply
+      never got anything queued during a gripper move, exactly matching
+      the "don't move together in x-axis" report. Replaced with
+      `animateGripperStop(x, targetYFor, targetZFor, onArriveChannel,
+      onArrive)`, a single reusable "one stop for all 8 channels + the
+      96-head" primitive (mirroring `animateChannelGroupOp()`'s own idle-
+      channel-dragging pattern, generalized to `(channelIndex) => target`
+      callbacks so it works for every kind of stop -- pad-attach,
+      resource-grip, resource-drop, pad-return -- without four separate
+      copies of the leg-enqueueing/dragging plumbing). Used uniformly by
+      all three `core_*` event handlers now.
+- [x] **ODTC block-height bug, found by comparing the two demos side by
+      side**: `scene-builder.js`'s carrier-height math (`buildResourceObject
+      ()`'s own `holderZs`) only ever looked at *actually assigned*
+      children's own locations to figure out "how tall is this carrier's
+      solid shaft, up to where its payload sits" -- fine for an ordinary
+      Carrier (its numbered sites are real child nodes from construction,
+      empty or not) but wrong for a `ResourceHolder`-based one like
+      `Thermocycler`, which has no such placeholder child node at all until
+      something is actually assigned to it. `thermocycler_demo.py` assigns
+      its plate before the scene is ever built, so this never showed up
+      there; `core_gripper_demo.py`'s ODTC starts empty (the plate arrives
+      later via the gripper), so it fell back to a ~10mm slab instead of
+      the real ~75mm-tall block. Fixed at the source: `scene.py` gained
+      `_inject_child_location()` (same "walk resource/node in lockstep and
+      add a field `serialize()` doesn't already carry" pattern
+      `_inject_tip_info()` already uses), adding a `child_location` field
+      to any node whose real resource has one (duck-typed via `getattr`,
+      not an `isinstance` check tied to one specific class);
+      `scene-builder.js`'s `holderZs` now folds that field in alongside
+      any actual children's own locations, so an empty `ResourceHolder`
+      gets its real payload height too. Confirmed live:
+      `STARDeck().get_resource("core_grippers")`-style lookup on an empty
+      `inheco_odtc_thermocycler()` now reports `child_location.z = 74.58`
+      even with zero children, and the rendered block's own geometry
+      height matched that number exactly (`74.58`, same as
+      `thermocycler_demo.py`'s already-populated one) after the fix.
+- [x] Verified all of the above with a rebuilt deterministic Node test
+      (no browser -- same "stub `document`/`THREE` canvas context, a
+      hand-built fake scene fed through the real `scene-builder.js`, fire
+      events with zero real time between them" approach "Review round 41"
+      introduced): idle channel 0 and the 96-head correctly track every
+      gripper stop's own x (pad-attach, resource-grip, resource-drop,
+      pad-return alike); pad visibility stays false until the pad-attach
+      stop's own arrival, not instantly at event receipt; the channel's
+      own z lands above (not buried in) both the pad fixture's and the
+      resource's reported z; the plate stays parked at its drop
+      destination through the trailing pad-return stop (channels-only, no
+      further plate motion once released); and a repeat pickup with
+      `needs_attach=false` skips the pad-travel stop entirely. Also
+      verified live end-to-end (`core_gripper_demo.py`, full 3-move run):
+      every sampled frame showed `channels[0].pos.x === channels[6].pos.x
+      === channels[7].pos.x` and `core96Head.pos.x === that - 368`
+      exactly, pad glyphs visibly toggled on/off across the run, and the
+      ODTC block's rendered geometry height matched the real
+      `child_location.z` exactly.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

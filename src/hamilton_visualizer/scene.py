@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 
 from pylabrobot.resources import Deck, TipRack
 from pylabrobot.resources.tip import Tip
+from pylabrobot.serializer import serialize
 
 
 def build_scene(deck: Deck) -> Dict[str, Any]:
@@ -29,6 +30,7 @@ def build_scene(deck: Deck) -> Dict[str, Any]:
 
   data = deck.serialize()
   _inject_tip_info(deck, data)
+  _inject_child_location(deck, data)
   return data
 
 
@@ -51,6 +53,43 @@ def _inject_tip_info(resource: Any, node: Dict[str, Any]) -> None:
 
   for child_resource, child_node in zip(resource.children, node.get("children") or []):
     _inject_tip_info(child_resource, child_node)
+
+
+def _inject_child_location(resource: Any, node: Dict[str, Any]) -> None:
+  """Walk ``resource``/``node`` in lockstep (same shape as
+  ``_inject_tip_info`` above) and add a ``child_location`` field to every
+  node whose real PyLabRobot resource has one -- i.e. every
+  ``ResourceHolder`` (``Thermocycler`` among them), duck-typed via
+  ``getattr`` rather than an ``isinstance`` check so this keeps working for
+  any future ``ResourceHolder`` subclass without an import to keep in sync.
+
+  ``Resource.serialize()`` never reports this on its own -- it's a
+  ``ResourceHolder``-only attribute (see ``resource_holder.py``), not part
+  of the base ``Resource`` fields ``serialize()`` walks. Without it,
+  ``scene-builder.js``'s carrier-height math (``buildResourceObject()``'s
+  own ``holderZs`` -- "draw a carrier as a shaft up to where its payload
+  actually sits") has no way to know that height for a ``ResourceHolder``
+  that's still *empty* at scene-build time (no child resource assigned
+  yet, so no child node to read a location from either) -- it fell back to
+  a thin, wrong-looking default platform instead of the real payload
+  height in that case (confirmed live: an Inheco ODTC placed on the deck
+  with nothing on it yet -- e.g. a plate that arrives later via a CoRe-
+  gripper move, unlike every other demo, which assigns the plate to it
+  before the scene is ever built -- rendered as a ~10mm slab instead of
+  the correct ~75mm-tall block). A plain child *resource* (a Carrier's own
+  numbered sites, always structurally present from construction regardless
+  of whether anything's actually parked there -- unlike a ``ResourceHolder``,
+  which has no such placeholder child node) doesn't have this problem,
+  which is why this needed its own dedicated field instead of already
+  being covered by the existing ``node.children`` scan.
+  """
+
+  child_location = getattr(resource, "child_location", None)
+  if child_location is not None:
+    node["child_location"] = serialize(child_location)
+
+  for child_resource, child_node in zip(resource.children, node.get("children") or []):
+    _inject_child_location(child_resource, child_node)
 
 
 def _representative_tip(tip_rack: TipRack) -> Optional[Tip]:

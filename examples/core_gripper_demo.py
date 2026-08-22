@@ -103,6 +103,15 @@ async def main() -> None:
     print("Moving plate from carrier site 0 to carrier site 1 (CoRe gripper)...")
     await lh.move_plate(plate, plate_carrier[1], use_arm="core", return_core_gripper=False)
 
+    # The lid starts *closed* by default (see thermocycler_demo.py's own
+    # docstring) -- a real ODTC's lid has to be open before a plate can
+    # land on the block at all, the same physical precondition
+    # thermocycler_demo.py itself demonstrates (there, by opening it before
+    # ever closing it). Left open afterward: nothing here ever closes it
+    # again before the plate comes back off two moves later.
+    print("Opening the thermocycler's lid to receive the plate...")
+    await tc.open_lid()
+
     print("Moving plate onto the thermocycler (CoRe gripper, pads already attached)...")
     await lh.move_plate(plate, tc, use_arm="core", return_core_gripper=False)
 

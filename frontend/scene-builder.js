@@ -196,9 +196,26 @@ export function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm
     // (plate/tip-rack, via a PlateHolder/ResourceHolder child) actually
     // sits, so the payload rests visibly on top instead of being buried
     // inside (or floating disconnected above) the carrier's box.
-    const holderZs = (node.children ?? [])
-      .map((c) => c.location?.z ?? 0)
-      .filter((z) => z > 0);
+    //
+    // A plain carrier's own numbered sites are structurally present as
+    // real child nodes from construction, regardless of whether anything's
+    // actually parked in them -- `node.children` alone is enough. A
+    // `ResourceHolder`-based carrier (currently just "thermocycler" --
+    // see categories.js) has no such placeholder child node: its one slot
+    // only becomes a child at all once a resource is actually assigned to
+    // it, so an *empty* one has nothing in `node.children` to read a
+    // height from. `node.child_location` (see scene.py's own
+    // `_inject_child_location()`) is that same slot's real height
+    // regardless of occupancy -- included alongside any actual children's
+    // own locations (not instead of) so an already-populated carrier of
+    // either kind keeps using its real occupant's location as before.
+    // Confirmed live: an Inheco ODTC placed with nothing on it yet (a
+    // plate that arrives later via a CoRe-gripper move, e.g.
+    // examples/core_gripper_demo.py) rendered as a ~10mm slab instead of
+    // the correct ~75mm-tall block without this.
+    const holderZs = [...(node.children ?? []).map((c) => c.location?.z ?? 0), node.child_location?.z ?? 0].filter(
+      (z) => z > 0
+    );
     sizeZ = holderZs.length > 0 ? Math.min(...holderZs) : ENVELOPE_PLATFORM_THICKNESS;
   } else if (isThin) {
     // tip_rack/plate have the same problem as carriers: a TipSpot's tip and
