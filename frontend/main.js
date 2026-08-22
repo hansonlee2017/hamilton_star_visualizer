@@ -703,17 +703,22 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm, paren
   let lidClosedPos = null;
   let lidOpenPos = null;
   if (node.category === "thermocycler") {
-    // sizeX (157.5mm, exactly 7 deck rails -- see inheco_odtc_thermocycler())
-    // is rail-parallel and narrow; sizeY (248mm) is the long, front-to-back
-    // axis a real ODTC actually has (per user direction). 0.85 covers the
-    // ~127.76mm SBS plate width the lid needs to clear with a little margin
-    // either side, out of the unit's own 157.5mm width.
-    const lidSizeX = sizeX * 0.85;
-    // Front region's depth along Y -- deliberately *not* half of sizeY: a
-    // real ODTC's plate-holding front section can run longer than its rear
-    // electronics section (per user direction: "the plate is in the front,
-    // but may be more than half"). 0.55 * 248mm =~ 136mm, a bit past half.
-    const lidSizeY = sizeY * 0.55;
+    // Sized off the real PCR plate's own SBS footprint (127.76 x 85.48mm --
+    // pylabrobot.resources.corning_costar.cor_96_wellplate_360uL_Fb, the
+    // plate this visualizer's own verification script lands on the
+    // thermocycler) plus a small clearance margin, *not* a fraction of the
+    // unit's own size_x/size_y -- a fraction of the housing was tried first
+    // and came out nearly square (~134 x ~136mm), which read as the lid
+    // being rotated 90 degrees next to the visibly landscape-shaped plate
+    // underneath it (a real plate, and its lid, are noticeably wider
+    // (rail-parallel, X) than deep (front-to-back, Y)). Anchoring directly
+    // to the plate's real proportions keeps the lid landscape-shaped no
+    // matter how the housing's own size_x/size_y are tuned.
+    const PLATE_FOOTPRINT_X_MM = 127.76;
+    const PLATE_FOOTPRINT_Y_MM = 85.48;
+    const lidClearanceMm = 6; // each side, so the lid visibly overlaps the plate's edges
+    const lidSizeX = PLATE_FOOTPRINT_X_MM + lidClearanceMm * 2;
+    const lidSizeY = PLATE_FOOTPRINT_Y_MM + lidClearanceMm * 2;
     const lidThickness = 8;
     const lidGeometry = new THREE.BoxGeometry(lidSizeX, lidThickness, lidSizeY);
     const lidMaterial = new THREE.MeshLambertMaterial({ color: 0x2c2f36 });

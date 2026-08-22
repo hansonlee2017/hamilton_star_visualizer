@@ -2285,6 +2285,18 @@ rather than guessed.
       `resourceIndex` confirmed `protocolSummary`/`lidOpen` matched exactly
       what was sent.
 
+      Follow-up fix (same round): the lid was first sized as a fraction of
+      the housing's own `size_x`/`size_y` (~134 x ~136mm) -- nearly square,
+      which read as rotated 90 degrees next to the visibly landscape-shaped
+      plate sitting under it (a real SBS plate, and its lid, are wider
+      (127.76mm, X) than deep (85.48mm, Y), not roughly equal). Re-derived
+      the lid's size directly from the real PCR plate's own footprint
+      (`cor_96_wellplate_360uL_Fb`: 127.76 x 85.48mm) plus a small
+      clearance margin instead, so it stays landscape-shaped regardless of
+      how the housing's own dimensions are tuned. Verified live:
+      `lidMesh.geometry.parameters` = `{width: 139.76, depth: 97.48}`,
+      matching the plate's own 127.76:85.48 aspect ratio.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
