@@ -139,6 +139,17 @@ objects, plus `.channels` for the gantry's own animation state) or
 `window.__lastStateMessages` (captured tip/volume state events) for
 debugging.
 
+For a timestamped trace of what the animation system is actually doing
+(op events received, resources attaching/detaching, gantry waits
+computed, thermocycler animations starting/finishing), turn on
+`frontend/log.js`'s optional leveled logging -- silent by default, same
+idea as Python's `logging` module. Either run
+`window.__log.setLevel("debug")` in the console, or open the page with
+`?logLevel=debug` in the URL; `"info"` gives a shorter high-level trace
+(one line per op, plus animation start/finish) without the finer
+per-attach/per-wait detail. Levels: `debug` < `info` < `warn` < `error` <
+`off`.
+
 Unit tests -- Python side (`src/hamilton_visualizer/normalization.py`'s
 pure decision logic, no PyLabRobot/browser involved):
 

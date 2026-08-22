@@ -10,6 +10,8 @@
 //   coordinates.js    -- PyLabRobot <-> Three.js coordinate mapping
 //   categories.js     -- category/tip color palette + legend data
 //   duration-scale.js -- the HUD's playback-speed multiplier
+//   log.js            -- optional leveled debug logging (off by default --
+//                        see this file's own `?logLevel=` handling below)
 //   scene-builder.js  -- scene graph -> Three.js object construction
 //   resource-state.js -- live tip/volume/protocol-summary state updates
 //   thermocycler.js   -- lid-slide + cycling-shimmer animation
@@ -36,6 +38,17 @@ import {
 import { applyState } from "./resource-state.js";
 import { connect } from "./websocket.js";
 import { initTooltip } from "./tooltip.js";
+import { LEVELS as LOG_LEVELS, setLevel as setLogLevel, getLevel as getLogLevel } from "./log.js";
+
+// `?logLevel=debug` (or info/warn/error/off, case-insensitive) turns on
+// this project's own optional debug trace right from page load -- see
+// log.js's own header comment for why this exists at all. Handy for a
+// scripted/automated browser session that can't easily type into
+// devtools; `window.__log.setLevel(...)` (below) covers the interactive
+// case. Left OFF (log.js's own default) if the param is absent or
+// unrecognized -- setLevel() itself already warns on a bad value.
+const logLevelParam = new URLSearchParams(window.location.search).get("logLevel");
+if (logLevelParam) setLogLevel(logLevelParam);
 
 // ---------------------------------------------------------------------------
 // Three.js scene setup
@@ -217,3 +230,11 @@ window.__viz = {
     return channels;
   },
 };
+
+// `window.__log.setLevel("debug")` turns on this project's own optional
+// trace live, from devtools, without a page reload (see log.js's own
+// header comment, and the `?logLevel=` handling above for the
+// reload-at-page-load equivalent). `LEVELS` exposed too, so
+// `window.__log.setLevel(window.__log.LEVELS.INFO)` works without typing
+// a string.
+window.__log = { setLevel: setLogLevel, getLevel: getLogLevel, LEVELS: LOG_LEVELS };

@@ -21,6 +21,9 @@ import { getDurationScale } from "./duration-scale.js";
 import { logEvent } from "./dom.js";
 import { CHANNEL_PITCH_MM, resolveChannelYs, planGantryPasses as planGantryPassesPure } from "./gantry-planning.js";
 import { MotionUnit } from "./motion-unit.js";
+import { makeLogger } from "./log.js";
+
+const log = makeLogger("gantry");
 
 export { CHANNEL_PITCH_MM, resolveChannelYs };
 
@@ -147,6 +150,10 @@ export class Channel {
     this.hasTip = false;
 
     this.group = new THREE.Group();
+    // Named purely so a resource's own attachResourceTo() log line (see
+    // log.js) reads as "-> channel-6" instead of "-> (unnamed group)" --
+    // never read back programmatically.
+    this.group.name = `channel-${index}`;
 
     // Radius 4.5 -- a 9mm diameter, exactly CHANNEL_Y_SPACING (the real
     // Hamilton channel pitch two adjacent channels sit at) -- so neighbor
@@ -928,6 +935,13 @@ function attachResourceTo(resourceName, topCenter, newParentGroup) {
   sceneRoot.attach(entry.group);
   entry.group.position.copy(resourceWorldPosition(entry.node, topCenter));
   newParentGroup.attach(entry.group);
+  log.debug(
+    "attach",
+    resourceName,
+    "->",
+    newParentGroup === sceneRoot ? "sceneRoot" : newParentGroup.name || "(unnamed group)",
+    JSON.stringify(topCenter)
+  );
 }
 
 // A resource "seated" on one of these is just resting in its ordinary
@@ -1185,13 +1199,28 @@ function gantryRemainingMs() {
 // the genuine shortfall (new channel work queued since the last call)
 // otherwise.
 function waitForGantry(entry) {
-  const holdMs = Math.max(0, gantryRemainingMs() - entry.animQueue.remainingMs);
+  const gantryMs = gantryRemainingMs();
+  const alreadyQueuedMs = entry.animQueue.remainingMs;
+  const holdMs = Math.max(0, gantryMs - alreadyQueuedMs);
+  log.debug(
+    `waitForGantry(${entry.node?.name ?? "?"}): gantryRemainingMs=${gantryMs.toFixed(0)}ms`,
+    `animQueue.remainingMs=${alreadyQueuedMs.toFixed(0)}ms`,
+    `-> holdMs=${holdMs.toFixed(0)}ms`
+  );
   if (holdMs > 0) {
     entry.animQueue.enqueue({ duration: holdMs, onTick: () => {} });
   }
 }
 
 export function handleOpEvent(msg) {
+  // The one place every op event -- however many more of this file's own
+  // enqueue()/attach() calls it ends up triggering -- passes through, so
+  // `window.__log.setLevel("info")` (see log.js) alone is enough to get a
+  // timestamped "what op arrived when" trace without touching any other
+  // call site. `?logLevel=` details finer than this (individual attaches,
+  // computed waits) log at "debug" instead -- see e.g. attachResourceTo()/
+  // waitForGantry()'s own calls.
+  log.info(msg.op, msg.resource ?? "");
   switch (msg.op) {
     case "pick_up_tips":
       animateChannelGroupOp(
@@ -1448,6 +1477,14 @@ export function handleOpEvent(msg) {
       const attachable = parentEntry && !isFixedInstallation(parentEntry.node.category);
       entry.pendingParents ??= [];
       entry.pendingParents.push(attachable ? msg.parent : null);
+      log.debug(
+        `resource_reparented: ${msg.resource} -> ${msg.parent ?? "(none)"}`,
+        `(category=${parentEntry?.node.category ?? "n/a"}, attachable=${!!attachable})`,
+        // .join() alone renders a `null` entry (a resource landing on a
+        // plain carrier slot, not attachable) as an empty string --
+        // spelling it out avoids a confusing "[, ]"-looking trailing gap.
+        `pendingParents now [${entry.pendingParents.map((p) => p ?? "null").join(", ")}]`
+      );
       break;
     }
     default:

@@ -3955,6 +3955,76 @@ technique.
       level constraint prior rounds documented; the replay technique
       above is considered sufficient to trust this fix in the meantime.
 
+## Review round 49
+
+User suggestion, after three rounds (46-48) of animation-timing bugs each
+diagnosed via a from-scratch deterministic Node replay harness: "Is there
+something similar to the Python logging package where you can set
+logging.INFO, logging.DEBUG and you can change the level to print out
+more or fewer messages?" -- an optional, leveled debug trace for the live
+browser app itself, as a lighter-weight complement to the replay
+technique (useful for confirming what *actually* rendered in a real
+session, not just what a deterministic replay predicts).
+
+- [x] **New `frontend/log.js`**: Python `logging`'s own DEBUG/INFO/WARN/
+      ERROR levels, ported to a small dependency-free module -- a
+      module-level threshold (`OFF` by default -- silent on an ordinary
+      run), `makeLogger(scope)` handing each caller its own tagged logger
+      (`log.debug(...)`/`.info(...)`/`.warn(...)`/`.error(...)`), each
+      call prefixed with `[<performance.now() ms>] [<scope>]` so a
+      captured trace and this project's own replay tests' "simulated ms
+      since the run started" convention read the same way side by side.
+      Below the threshold, a call is a single comparison and returns --
+      no formatting/console work happens unless the message will actually
+      print.
+- [x] **Two ways to set the threshold**: `window.__log.setLevel("debug")`
+      from devtools, live, no reload (alongside the existing
+      `window.__viz` debug hook -- main.js); or `?logLevel=debug` in the
+      URL, read once at page load, for a scripted/automated session that
+      can't easily type into devtools.
+- [x] **Instrumented the exact spots this session's own three timing bugs
+      lived in** -- not a blanket trace of everything, since a Python-
+      logging-style level system doesn't help if the DEBUG level is still
+      too noisy to read: `handleOpEvent()`'s own entry point logs every
+      op at INFO (resource/op name -- the one line that, alone, gives
+      "what op arrived when" for the whole run); `attachResourceTo()`
+      logs at DEBUG (which resource attached to which parent's group,
+      and the target coordinate); `waitForGantry()` logs at DEBUG (the
+      raw `gantryRemainingMs()` snapshot, this queue's own already-queued
+      `remainingMs`, and the resulting `holdMs` -- would have shown
+      "Review round 48"'s own stacking bug immediately, as a `holdMs`
+      that never drops to 0 across repeated calls); the
+      `"resource_reparented"` case logs at DEBUG (resource, parent,
+      category, the attach/no-attach decision, and the resulting
+      `pendingParents` queue contents); `thermocycler.js`'s
+      `queueLidAnimation()`/`queueThermocyclerShimmer()` log at INFO on
+      `onStart`/`onComplete` (the actual visible animation triggers).
+      Channel groups gained a `.name` (`channel-N`) purely so an attach
+      log line reads as `-> channel-7` instead of `-> (unnamed group)`.
+- [x] This composes directly with this project's own existing browser
+      tooling: `window.__log.setLevel("debug")` (or the `?logLevel=`
+      query param) followed by
+      `mcp__Claude_Browser__read_console_messages` pulls a complete,
+      timestamped trace straight out of a live page -- the "log file to
+      examine instead of taking screenshots" the user was asking about --
+      with no new backend plumbing, no file-writing code, and no
+      changes to this project's "the frontend is a thin static-file
+      client" architecture at all.
+- [x] Verified: `tests/frontend/log.test.js` (new) covers the
+      level-gating logic itself (silent by default, string vs. numeric
+      levels, an unrecognized name warns without changing the threshold,
+      the timestamp+scope prefix, independent scopes sharing one
+      threshold). A live smoke test -- the same captured
+      `pcr_setup_demo.py` event stream this session's prior three rounds
+      already used, replayed with `setLevel("debug")` -- confirmed the
+      resulting trace reads exactly as intended: e.g.
+      `waitForGantry(thermocycler_1): gantryRemainingMs=48200ms
+      animQueue.remainingMs=44900ms -> holdMs=3300ms` for the second
+      call, then `-> holdMs=0ms` for the third and fourth -- directly
+      showing "Review round 48"'s own fix working, in a single log line,
+      with no replay harness needed to see it. All 36 unit tests (30
+      prior + 6 new for log.js) pass.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

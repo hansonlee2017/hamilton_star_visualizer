@@ -16,6 +16,9 @@
 
 import * as THREE from "three";
 import { getDurationScale } from "./duration-scale.js";
+import { makeLogger } from "./log.js";
+
+const log = makeLogger("thermocycler");
 
 export const THERMOCYCLER_LID_MS = 600;
 // Deliberately not tied to the backend's own timing at all -- run_protocol()
@@ -39,6 +42,7 @@ export function queueLidAnimation(entry, opening) {
     onStart: () => {
       from = entry.lidMesh.position.clone();
       entry.lidOpen = opening;
+      log.info(`${entry.node?.name ?? "?"}: lid ${opening ? "opening" : "closing"} animation started`);
     },
     onTick: (t) => {
       entry.lidMesh.position.lerpVectors(from, to, t);
@@ -59,6 +63,7 @@ export function queueThermocyclerShimmer(entry) {
     duration: () => THERMOCYCLER_SHIMMER_MS * getDurationScale(),
     onStart: () => {
       baseColor = entry.baseColor.clone();
+      log.info(`${entry.node?.name ?? "?"}: cycling shimmer started`);
     },
     onTick: (t) => {
       // A handful of full oscillations over the whole window, not one slow
@@ -71,6 +76,7 @@ export function queueThermocyclerShimmer(entry) {
     },
     onComplete: () => {
       material.color.copy(baseColor);
+      log.info(`${entry.node?.name ?? "?"}: cycling shimmer finished`);
     },
   });
 }
