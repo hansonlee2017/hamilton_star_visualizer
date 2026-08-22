@@ -16,9 +16,10 @@ See ``docs/DESIGN.md`` and ``examples/demo_protocol.py``.
 """
 
 from hamilton_visualizer.server import VisualizerServer
+from hamilton_visualizer.thermocycler_backend import VisualizerThermocyclerBackend
 from hamilton_visualizer.visualizer_backend import VisualizerBackend
 
-__all__ = ["VisualizerServer", "VisualizerBackend"]
+__all__ = ["VisualizerServer", "VisualizerBackend", "VisualizerThermocyclerBackend"]
 
 
 def main() -> None:

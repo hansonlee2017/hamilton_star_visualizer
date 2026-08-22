@@ -45,6 +45,11 @@ const CATEGORY_COLORS = {
   well: 0x59c9a5,
   tip_spot: 0x8a8f98,
   trash: 0x8a3d3d,
+  // Distinct from every carrier's neutral grey -- this is an active
+  // instrument, not passive labware support, and the warm tone previews
+  // the shimmer effect run_protocol() triggers (see animateThermocycler
+  // Shimmer()).
+  thermocycler: 0x8a5a3d,
 };
 const DEFAULT_COLOR = 0x6b7280;
 
@@ -65,6 +70,16 @@ const CARRIER_CATEGORIES = new Set([
   // as a full-height solid box that buries its own trough, the same bug
   // already fixed for the others in round 7.
   "trough_carrier",
+  // Per user direction: render the thermocycler the same "solid block up
+  // to the payload holder" way as any other carrier -- its own declared
+  // size_z (124.3mm, the ODTC's real full housing height -- see
+  // custom_labware.py) is likewise bigger than the visible payload
+  // surface (child_location.z, ~74.6mm, where a PCR plate actually sits).
+  // A separate lid mesh (see buildResourceObject()) sits above this block,
+  // not part of it -- the lid is the one part of a real ODTC that visibly
+  // moves (see thermocycler_backend.py's docstring: "opens and closes by
+  // horizontal move").
+  "thermocycler",
 ]);
 const ENVELOPE_PLATFORM_THICKNESS = 10;
 // tip_rack and plate have the same "declared size_z is bigger than the
@@ -142,6 +157,7 @@ const LEGEND_ENTRIES = [
   ["Well (fill level)", 0x59c9a5],
   ["Trash", 0x8a3d3d],
   ["Gantry channel", 0xe0b23d],
+  ["Thermocycler", 0x8a5a3d],
 ];
 
 // ---------------------------------------------------------------------------
@@ -675,6 +691,60 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm, paren
     hoverables.push(mesh);
   }
 
+  // A real Inheco ODTC's lid isn't a PyLabRobot child resource (Thermocycler
+  // models a plate landing directly on the block via child_location, not a
+  // separate lid sub-resource -- see custom_labware.py), so there's no scene
+  // node to build this from; it's purely a visualizer-side extra, sized and
+  // positioned as an approximation of the plate-holder area it needs to
+  // cover. Slides horizontally to "open" (see thermocycler_backend.py's
+  // docstring for why that's the real mechanism, not a hinge) -- see
+  // animateThermocyclerLid().
+  let lidMesh = null;
+  let lidClosedPos = null;
+  let lidOpenPos = null;
+  if (node.category === "thermocycler") {
+    // sizeX (157.5mm, exactly 7 deck rails -- see inheco_odtc_thermocycler())
+    // is rail-parallel and narrow; sizeY (248mm) is the long, front-to-back
+    // axis a real ODTC actually has (per user direction). 0.85 covers the
+    // ~127.76mm SBS plate width the lid needs to clear with a little margin
+    // either side, out of the unit's own 157.5mm width.
+    const lidSizeX = sizeX * 0.85;
+    // Front region's depth along Y -- deliberately *not* half of sizeY: a
+    // real ODTC's plate-holding front section can run longer than its rear
+    // electronics section (per user direction: "the plate is in the front,
+    // but may be more than half"). 0.55 * 248mm =~ 136mm, a bit past half.
+    const lidSizeY = sizeY * 0.55;
+    const lidThickness = 8;
+    const lidGeometry = new THREE.BoxGeometry(lidSizeX, lidThickness, lidSizeY);
+    const lidMaterial = new THREE.MeshLambertMaterial({ color: 0x2c2f36 });
+    lidMesh = new THREE.Mesh(lidGeometry, lidMaterial);
+    // Resting height: near the top of the *declared* full housing height
+    // (node.size_z, 124.3mm for a real ODTC), not the shorter carrier-style
+    // sizeZ used for the block above (which only reaches the payload holder
+    // height) -- leaves clearance for a PCR plate's own height between the
+    // holder and the closed lid.
+    const lidRestZ = (node.size_z ?? sizeZ) * 0.85;
+    // Front margin matches child_location.y's own 5mm margin.
+    const lidFrontMarginMm = 5;
+    const lidCenterY = lidFrontMarginMm + lidSizeY / 2;
+    lidClosedPos = new THREE.Vector3(sizeX / 2, lidRestZ, -lidCenterY);
+    // "Open" slides the lid back along Y (per user direction: "the lid
+    // should slide along the y-axis") just far enough to clear the plate,
+    // capped so it lands flush with the unit's own rear edge (sizeY) rather
+    // than overhanging past the real housing's footprint.
+    const lidSlideDistanceMm = sizeY - (lidCenterY + lidSizeY / 2);
+    lidOpenPos = new THREE.Vector3(sizeX / 2, lidRestZ, -lidCenterY - lidSlideDistanceMm);
+    lidMesh.position.copy(lidClosedPos);
+    lidMesh.userData = {
+      resourceName: node.name,
+      resourceType: node.type,
+      category: node.category,
+      model: node.model,
+    };
+    group.add(lidMesh);
+    hoverables.push(lidMesh);
+  }
+
   if (isDeck) {
     addRailLabels(group, node, deckSurfaceZ);
     addRailLines(group, node, deckSurfaceZ);
@@ -750,6 +820,17 @@ function buildResourceObject(node, isRoot, parentSizeZ, parentTipLengthMm, paren
     // something sensible to show even before any "state" message arrives.
     volume: null,
     maxVolume: node.max_volume ?? null,
+    // Thermocycler-only fields -- lidMesh/lidOpenPos/lidClosedPos null for
+    // every other category (see the "thermocycler" branch above).
+    lidMesh,
+    lidOpenPos,
+    lidClosedPos,
+    lidOpen: false,
+    // Last-run protocol's human-readable summary (see
+    // thermocycler_backend.py's summarize_protocol()) -- set by applyState()
+    // below on a "protocol_summary" state message, shown in the hover
+    // tooltip. null until a protocol has actually run.
+    protocolSummary: null,
   });
 
   // Children's own layout math (e.g. the tip-spot pyramid's "where's the
@@ -833,6 +914,8 @@ function applyState(resourceName, state) {
     entry.mesh.material.opacity = opacity;
     entry.volume = state.volume;
     if (state.max_volume != null) entry.maxVolume = state.max_volume;
+  } else if (Object.prototype.hasOwnProperty.call(state, "protocol_summary")) {
+    entry.protocolSummary = state.protocol_summary;
   }
 }
 
@@ -859,6 +942,61 @@ function applyEmbeddedResourceState(entry) {
     target.volume = entry.resource_volume;
     if (entry.resource_max_volume != null) target.maxVolume = entry.resource_max_volume;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Thermocycler: lid slide + cycling shimmer
+// ---------------------------------------------------------------------------
+const THERMOCYCLER_LID_MS = 600;
+// Deliberately not tied to the backend's own timing at all -- run_protocol()
+// completes instantly against the chatterbox backend (see
+// thermocycler_backend.py's module docstring for why this visualizer never
+// simulates real cycling time), so this fixed window is *the entire reason*
+// a "cycling" animation is visible at all.
+const THERMOCYCLER_SHIMMER_MS = 5000;
+
+// Plain requestAnimationFrame tweens, like flowPulse()/Channel.pulse() --
+// not routed through a Channel's enqueue()'d position queue, since the
+// thermocycler itself never moves; only its lid (a short, fixed slide) and
+// its block's color (a fixed-duration pulse) do.
+function animateThermocyclerLid(entry, opening) {
+  if (!entry.lidMesh || !entry.lidOpenPos || !entry.lidClosedPos) return;
+  const from = entry.lidMesh.position.clone();
+  const to = opening ? entry.lidOpenPos : entry.lidClosedPos;
+  entry.lidOpen = opening;
+  const start = performance.now();
+  const duration = THERMOCYCLER_LID_MS * durationScale;
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / duration);
+    entry.lidMesh.position.lerpVectors(from, to, t);
+    if (t < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// A warm pulsing color on the block itself -- the same "something is
+// actively happening here" language flowPulse() uses for a channel's tip,
+// scaled to a whole-block, multi-second effect instead of one leg's ~550ms.
+const THERMOCYCLER_SHIMMER_COLOR = new THREE.Color(0xffa040);
+function animateThermocyclerShimmer(entry) {
+  if (!entry.mesh) return;
+  const material = entry.mesh.material;
+  const baseColor = entry.baseColor.clone();
+  const start = performance.now();
+  const duration = THERMOCYCLER_SHIMMER_MS * durationScale;
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / duration);
+    // A handful of full oscillations over the whole window, not one slow
+    // fade -- reads as "actively cycling," not just "briefly highlighted."
+    const pulse = (Math.sin(t * Math.PI * 2 * 6) + 1) / 2;
+    material.color.copy(baseColor).lerp(THERMOCYCLER_SHIMMER_COLOR, pulse * 0.7);
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else {
+      material.color.copy(baseColor);
+    }
+  };
+  requestAnimationFrame(step);
 }
 
 // ---------------------------------------------------------------------------
@@ -1528,6 +1666,22 @@ function handleOpEvent(msg) {
       );
       break;
     }
+    case "thermocycler_open_lid":
+    case "thermocycler_close_lid": {
+      const entry = resourceIndex.get(msg.resource);
+      if (entry) animateThermocyclerLid(entry, msg.op === "thermocycler_open_lid");
+      logEvent(msg.op, msg.resource ?? "");
+      break;
+    }
+    case "thermocycler_run_protocol": {
+      const entry = resourceIndex.get(msg.resource);
+      if (entry) {
+        entry.protocolSummary = msg.protocol_summary;
+        animateThermocyclerShimmer(entry);
+      }
+      logEvent(msg.op, `${msg.resource}: ${msg.protocol_summary ?? ""}`);
+      break;
+    }
     default:
       // 96-head / resource-move / manual-jog events: not animated in v1, but
       // still worth surfacing in the log so the panel reflects everything
@@ -1663,11 +1817,22 @@ renderer.domElement.addEventListener("pointermove", (event) => {
         volumeLine = `<div class="volume">${entry.volume.toFixed(1)}${max} &micro;L</div>`;
       }
     }
+    // Last-run PCR profile, e.g. "95.0C 0:30, 55.0C 0:30, 72.0C 1:00 (x30)"
+    // -- see thermocycler_backend.py's summarize_protocol(). Omitted (not
+    // "no protocol yet") until run_protocol() has actually broadcast one.
+    let protocolLine = "";
+    if (category === "thermocycler") {
+      const entry = resourceIndex.get(resourceName);
+      if (entry && entry.protocolSummary) {
+        protocolLine = `<div class="volume">${entry.protocolSummary}</div>`;
+      }
+    }
     tooltipEl.innerHTML =
       `<div class="name">${resourceName}</div>` +
       `<div class="type">${resourceType}${category ? " &middot; " + category : ""}</div>` +
       modelLine +
-      volumeLine;
+      volumeLine +
+      protocolLine;
   } else {
     tooltipEl.style.display = "none";
   }

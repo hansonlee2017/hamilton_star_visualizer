@@ -2196,6 +2196,95 @@ sample step) boundary round 33 built.
       wells' destination/source volumes against `normalization_results.csv`,
       reservoir settled at the same exact 2,000uL.
 
+## Review round 35 (2026-08-21)
+
+User request: three new capabilities -- a CO-RE 96 head (deferred to the
+next round), an Inheco on-deck thermal cycler integration, and a bigger
+deck (`STARDeck` instead of `STARLetDeck`) to fit them. Explicitly asked
+for a plan and clarifying questions first; four real decisions came back:
+pure infrastructure (no polished demo yet, verified with standalone
+scripts instead), the 96-head and the 8 regular channels coexist on deck
+rather than being exclusive, the lid should actually animate (not just the
+5-second block shimmer), and Inheco's real dimensions should be researched
+rather than guessed.
+
+- [x] **Investigated PyLabRobot's actual thermocycling support before
+      building anything** (the user's explicit ask -- "check if it is a
+      resource holder or PCR adapter... whether it has a chatterbox
+      backend"): confirmed `pylabrobot.thermocycling.thermocycler.
+      Thermocycler` *is* a `ResourceHolder` (a plate lands directly via
+      `child_location`, no separate PCR-adapter resource needed at the API
+      level) that's also a `Machine` with its own `ThermocyclerBackend`;
+      confirmed a real `ThermocyclerChatterboxBackend` exists (device-free,
+      completes `run_protocol()` instantly -- the same role
+      `LiquidHandlerChatterboxBackend` plays); confirmed a real `Protocol`/
+      `Stage`/`Step` model (`temperature: List[float]`, `hold_seconds`)
+      -- exactly the data the tooltip needed. No pre-built "Inheco ODTC"
+      resource ships with PyLabRobot, so this one had to be constructed by
+      hand, same as `custom_labware.py`'s Cellvis plate.
+- [x] **`custom_labware.py` gained `inheco_odtc_thermocycler()`**, with
+      real dimensions from Inheco's own product page (248 x 156.5 x
+      124.3mm) confirmed via a fresh web fetch, not assumed -- including
+      the detail that mattered for the lid animation: a real ODTC's lid
+      "opens and closes by horizontal move," not a hinge. Oriented with
+      its long 248mm side running front-to-back (`size_y`), not
+      rail-parallel -- corrected mid-round after an initial wrong guess
+      (real ODTCs are placed with the long axis into the deck, plate in
+      the front section, electronics in the rear; the front section isn't
+      necessarily half the depth). `size_x` is deliberately widened 1mm
+      from the real 156.5mm to 157.5mm -- exactly 7 Hamilton deck rails
+      (22.5mm pitch) -- so it places flush against a rail boundary like
+      any other carrier instead of leaving an unusable sliver (per user
+      direction). `child_location` (where a plate lands) isn't published
+      anywhere found, so it's an explicit, documented engineering estimate
+      (60% of the unit's height), not a fabricated spec.
+- [x] **New `src/hamilton_visualizer/thermocycler_backend.py`
+      (`VisualizerThermocyclerBackend`)**, the same wrap-and-forward
+      pattern as `VisualizerBackend` applied to `ThermocyclerBackend`.
+      Structurally different from the liquid-handling side in one real
+      way: a `ThermocyclerBackend`'s calls carry only plain values (never
+      a resource reference, since one backend is permanently bound to
+      exactly one machine), so it needs the resource's own name passed in
+      at construction instead of read off each op. `run_protocol()`
+      broadcasts a `thermocycler_run_protocol` op event carrying
+      `summarize_protocol()`'s human-readable line (e.g. "95C 5:00; 95C
+      0:30, 55C 0:30, 72C 1:00 (x30); 72C 5:00") and caches it via
+      `record_resource_state()` so a client connecting after the run (or a
+      page reload) still shows it; `open_lid()`/`close_lid()` broadcast
+      their own op events.
+- [x] **Frontend: a new "thermocycler" category**, rendered the way the
+      user specifically asked -- reusing the existing carrier treatment
+      (a solid block from the base up to the payload holder height, i.e.
+      exactly "a base rectangle plus a plate holder," no new geometry code
+      needed for that part) plus one genuinely new piece: a separate lid
+      mesh (not a PyLabRobot child resource -- Thermocycler's model has no
+      lid sub-resource, so this is purely a visualizer-side extra) that
+      slides horizontally on `thermocycler_open_lid`/`_close_lid`, matching
+      the real hardware's actual mechanism. `run_protocol()`'s 5-second
+      "cycling" is a fixed-duration pulsing-color shimmer on the block,
+      deliberately decoupled from the backend's instant completion --
+      the same "animation timing ignores backend timing" philosophy as
+      every liquid-handling op in this visualizer, now extended to a
+      second machine type. Tooltip shows the last-run protocol's summary
+      once one exists.
+
+      Verified live (`STARDeck`, per this round's third ask): a standalone
+      script built a thermocycler holding a PCR plate, placed it at
+      exactly 7 rails wide and centered on the deck's own Y depth (per
+      user direction, so it's easily reachable rather than tucked in the
+      usual front carrier band), closed the lid, ran a real
+      3-stage/32-cycle protocol, then opened the lid again. Confirmed
+      numerically: `size_x == 157.5 == 7 * 22.5` (rail pitch); placement
+      `location.y == 202.75 == (653.5 - 248) / 2` (deck depth minus the
+      thermocycler's own 248mm, centered); the lid's open position lands
+      exactly flush with the unit's own rear edge
+      (`lidCenterY + lidSizeY/2 + slideDistance == sizeY`), not overhanging
+      past the real housing. The event log showed the exact expected
+      summary string; the lid visibly slid along Y from covering the plate
+      to clear of it and back; the tooltip showed the full protocol text;
+      `resourceIndex` confirmed `protocolSummary`/`lidOpen` matched exactly
+      what was sent.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

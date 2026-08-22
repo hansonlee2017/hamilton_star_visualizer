@@ -10,9 +10,12 @@ own catalog entries are underneath their factory functions too.
 
 from __future__ import annotations
 
+from pylabrobot.resources import Coordinate
 from pylabrobot.resources.plate import Plate
 from pylabrobot.resources.utils import create_ordered_items_2d
 from pylabrobot.resources.well import CrossSectionType, Well, WellBottomType
+from pylabrobot.thermocycling.backend import ThermocyclerBackend
+from pylabrobot.thermocycling.thermocycler import Thermocycler
 
 
 def cellvis_384_wellplate_120uL_Fb(name: str) -> Plate:
@@ -84,4 +87,58 @@ def cellvis_384_wellplate_120uL_Fb(name: str) -> Plate:
       cross_section_type=CrossSectionType.RECTANGLE,
       max_volume=120.0,
     ),
+  )
+
+
+def inheco_odtc_thermocycler(name: str, backend: ThermocyclerBackend) -> Thermocycler:
+  """Inheco ODTC (On-Deck Thermal Cycler), standard 96/384-well version:
+  https://www.inheco.com/odtc.html
+
+  Real dimensions from Inheco's own product page: 248mm (L) x 156.5mm (W)
+  x 124.3mm (H) -- "footprint on just two standard microplates" (its own
+  phrasing; two SBS plates end-to-end run ~255mm, matching the 248mm
+  length closely) and an "ultra-flat design" specifically so a pipetting
+  arm can clear it. Weighs ~7.5kg; +4C to +99C range; the lid is a
+  "horizontal-opening heated lid" that "opens and closes by horizontal
+  move" (not a hinge) -- see this module's caller for how that shapes the
+  lid's animation.
+
+  Oriented with its long side (size_y, 248mm) running front-to-back, not
+  parallel to the deck's rails (per user direction, correcting this
+  module's own first guess -- confirmed live). The lid slides open along
+  that same Y axis -- see this module's caller for the animation.
+
+  size_x (rail-parallel) is deliberately widened from the real 156.5mm to
+  157.5mm -- exactly 7 Hamilton deck rails (rail pitch is 22.5mm; see
+  ``HamiltonSTARDeck._RAILS_WIDTH``, confirmed live: 7 * 22.5 = 157.5), so
+  ``deck.assign_child_resource(tc, rails=N)`` places it flush against a
+  rail boundary like any other carrier instead of leaving a ~1mm sliver of
+  unusable deck next to it (per user direction: "make the ODTC exactly 7
+  rails wide, so it is compatible with all the other carriers"). This is a
+  1mm engineering rounding, not a manufacturer figure.
+
+  ``child_location`` (where a PCR plate lands) is *not* one of Inheco's
+  published figures -- no manufacturer spec sheet states it, and Hamilton's
+  own labware definition for this device isn't publicly available either.
+  Height estimated at 60% of the unit's own height (~75mm): high enough to
+  clear the block/Peltier electronics that occupy the lower portion of a
+  real thermal cycler, low enough to leave clearance above for a PCR
+  plate's own height (~15-20mm) plus the lid closing over it within the
+  remaining ~50mm. The plate's Y position (front-to-back) is *not*
+  centered on the unit's own 248mm depth, per user direction: a real
+  ODTC's front section holds the plate (not necessarily half the unit's
+  depth -- could be more), its rear section holds the temperature-control
+  electronics -- placed flush against the front edge (a small margin, not
+  y=0 exactly) instead. Both are engineering approximations for this
+  visualizer's purposes, not manufacturer-published values.
+  """
+
+  return Thermocycler(
+    name=name,
+    size_x=157.5,
+    size_y=248.0,
+    size_z=124.3,
+    backend=backend,
+    child_location=Coordinate(x=(157.5 - 127.76) / 2, y=5.0, z=124.3 * 0.6),
+    model=inheco_odtc_thermocycler.__name__,
   )
