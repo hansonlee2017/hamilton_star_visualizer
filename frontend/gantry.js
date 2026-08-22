@@ -1160,11 +1160,37 @@ function gantryRemainingMs() {
 // standalone simulation of AnimationQueue's real update loop at 60fps:
 // consistently ~66.67ms -- almost exactly 4 frames -- for a 2-stop hold,
 // regardless of frame-phase offset -- see "Review round 42").
+//
+// `preexistingMs` is an *absolute* quantity -- gantryRemainingMs()'s own
+// return value, measured from "now" across the whole gantry -- but a
+// resource picked up more than once (every lid in this project's own
+// demos: capped, then re-seated onto the ODTC, then off again, then
+// uncapped -- see pcr_setup_demo.py's own docstring) already has some of
+// its own backlog still queued on `cp` from its *previous* pickup, which
+// will elapse for free while this hold plays, in parallel with the rest
+// of the gantry -- not sequentially, on top of it. Enqueuing the raw
+// absolute `preexistingMs` on top of that unrelated, already-queued
+// backlog double counts the overlap: this resource wouldn't actually
+// finish its *new* hold until `cp`'s own prior backlog *plus*
+// `preexistingMs`, when the gantry it's meant to be waiting for finishes
+// at `preexistingMs` alone (confirmed live: a standalone replay of this
+// project's own captured pcr_setup_demo.py event stream through the real
+// frontend modules showed the lid's own redundant re-seat onto the
+// thermocycler not starting to travel until simulated t=95.6s, when the
+// channels it was supposedly waiting for finished at t=49.3s -- the
+// missing ~46s exactly matches `cp`'s own prior, already-in-flight
+// backlog from the preceding cap operation, added a second time on top).
+// Subtracting `cp`'s own current remainingMs converts the absolute
+// quantity into the actual remaining deficit -- 0 whenever this
+// resource's own queue already outlasts the rest of the gantry (the
+// common case for a resource with a long journey of its own already
+// queued), and only the genuine shortfall otherwise.
 function holdCarriedPlate(resourceName, preexistingMs, stops) {
   const cp = carriedPlates.get(resourceName);
   if (!cp) return;
-  if (preexistingMs > 0) {
-    cp.enqueue({ x: null, y: null, z: null }, preexistingMs);
+  const holdMs = Math.max(0, preexistingMs - cp.motion.remainingMs);
+  if (holdMs > 0) {
+    cp.enqueue({ x: null, y: null, z: null }, holdMs);
   }
   for (let i = 0; i < stops; i++) {
     cp.enqueue({ x: null, y: null, z: null }, scaled(RISE_MS));

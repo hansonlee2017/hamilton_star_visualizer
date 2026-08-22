@@ -3552,6 +3552,115 @@ pipetting to finish." Three layered issues, found in order:
       timing measurements being *less* reliable than a deterministic Node
       test, never more.
 
+## Review round 45
+
+User feedback after "Review round 44" landed: "Right now the plate and
+lid movement precede the movement of the pipettes. And the lid somehow
+teleport to the ODTC at the end." A real remaining bug in the previous
+round's own fix, found this time via a more faithful reproduction than a
+hand-crafted fixture: a small Python script (`capture_events.py`, not
+checked in -- scratchpad-only) runs `pcr_setup_demo.py`'s own real
+protocol logic against a real `VisualizerServer`/`VisualizerBackend` with
+no live socket and no browser, and dumps `server._events` (already
+recorded regardless of whether any client is connected) to JSON -- a
+genuine captured event stream, not a guess at what one might look like.
+A Node test then replays it through the real `gantry.js`/`scene-
+builder.js`, ticking every channel, the 96-head, `updateCarriedPlate()`,
+*and* every `resourceIndex` entry's own `animQueue` exactly the way
+`main.js`'s own `animate()` loop does.
+
+- [x] **Root cause: `holdCarriedPlate()`'s hold was an absolute quantity,
+      not a relative one.** `preexistingMs` (from `gantryRemainingMs()`)
+      is "how long from *now* until the busiest thing in the gantry
+      finishes" -- correct the *first* time a resource is ever picked up
+      (its own queue starts empty, so the hold needed really is the full
+      `preexistingMs`). But every resource in this project's own demos
+      that gets picked up more than once (a lid: capped, then re-seated
+      onto the ODTC, then re-seated off again, then uncapped -- see
+      `pcr_setup_demo.py`'s own docstring) already has some of its *own*
+      backlog still queued on its `CarriedPlate` at the moment of a
+      *later* pickup -- which elapses for free, in parallel with the rest
+      of the gantry, not sequentially on top of it. Enqueuing the raw
+      absolute `preexistingMs` value as this pickup's own hold task
+      double-counted that overlap: the resource wouldn't actually resume
+      moving until (its own already-queued backlog) + (the *entire*
+      `preexistingMs` again), when it only needed to wait out the
+      difference. Confirmed via the faithful replay above: the lid's own
+      redundant re-seat onto the thermocycler (the second of its four
+      pickups in the demo) didn't start traveling until simulated
+      t=95.6s, when the channels it was supposedly waiting for had
+      already finished at t=49.3s -- the missing ~46s exactly matched the
+      lid's own still-queued backlog from the *preceding* cap operation,
+      stacked on top a second time. This compounds on every subsequent
+      pickup of the same resource (each one's own already-inflated
+      backlog gets included in the *next* one's "preexisting" measurement
+      too), which is what produced both reported symptoms: "precede the
+      movement of the pipettes" was a red herring from this same replay
+      test's own first, over-eager milestone check (comparing against
+      "every channel completely idle across the whole 6-step run," a
+      moving target that keeps climbing as more gripper choreography gets
+      added, not against "the fill specifically finished") -- the fill
+      itself, and the first cap movement, were already correctly ordered
+      even before this fix. The *real* observable bug was the "teleport":
+      with enough compounding, the lid's own queue could take minutes
+      longer to drain than the rest of the run, an actual live viewer
+      would see it "stuck" at an intermediate position for a long stretch
+      while everything else (the thermal cycle, the plate's own return)
+      visibly finished around it, then finally jump into motion and land
+      on the ODTC (or, on the final uncap, its own original site) all at
+      once whenever its own overdue queue finally caught up -- reads as a
+      "teleport" even though every individual leg was still a real,
+      continuous tween, just badly delayed as a whole.
+- [x] **Fix**: `holdCarriedPlate()` now enqueues `Math.max(0,
+      preexistingMs - cp.motion.remainingMs)` instead of the raw
+      `preexistingMs` -- the actual remaining deficit, zero whenever this
+      resource's own already-queued journey already outlasts the rest of
+      the gantry (the common case for a resource with a long journey of
+      its own still queued), and only the genuine shortfall otherwise.
+      `cp.motion.remainingMs` is read at the same point `preexistingMs`
+      itself is used (right before this pickup's own hold is enqueued),
+      so it reflects exactly what's still undrained on this resource's
+      queue *before* this pickup's own new legs are added on top of it.
+      (An earlier attempt at this fix tried excluding the resource's own
+      `carriedPlates` entry from `gantryRemainingMs()`'s own max instead
+      -- reverted once the faithful replay showed zero effect: the
+      channels' own backlog, which independently accumulates *everything*
+      via `animateGripperStop()`'s own idle-channel dragging, already
+      dominated the max in every case tested, so excluding self from the
+      max never actually changed `preexistingMs`'s own value. The
+      double-counting was entirely in what `holdCarriedPlate()` did with
+      that value afterward, not in how it was measured.)
+- [x] Verified: the same faithful replay above, re-run after the fix,
+      shows the *entire* 6-step demo's own gantry-side animation (fill
+      through final uncap) now finishing by simulated t≈60.6s (matching
+      the fill's own real backlog, the dominant cost) instead of dragging
+      out past t=250s+ under the old bug; the lid's own first real
+      movement (t=43.9s) and the plate's own first real movement
+      (t=48.3s) both land after the fill itself genuinely finishes
+      (t=41.6s, read directly off the channels' own backlog right before
+      the first gripper op) -- pipettes first, as reported missing;
+      critically, the lid lands back at its *exact* original position
+      (bit-for-bit equal world coordinates) at the very end of the run,
+      proving the full four-pickup round trip (cap, onto-ODTC re-seat,
+      off-ODTC re-seat, uncap) stays numerically consistent with no lost
+      or misordered legs anywhere along it -- not just "close enough,"
+      which a lingering compounding-delay bug elsewhere could still have
+      masked. Also re-ran (and extended with a new, explicitly *bounded*-
+      time check -- "reaches its destination within a modest fixed
+      budget, not the size of its own entire prior journey") both of
+      "Review round 44"'s own hand-fixture deterministic tests (single-
+      resource backlog, multi-resource lid/plate/lid alternation); all
+      pass, confirming the relative-hold fix doesn't regress either
+      scenario. All 30 pre-existing unit tests still pass.
+- [x] Live browser verification remains blocked by the same environment-
+      level Browser-pane-not-compositing constraint "Review round 44"
+      documented -- unchanged this round. The faithful event-capture
+      replay above is a substantially stronger substitute than a hand-
+      built fixture would be (it drives the *actual* protocol logic
+      through the *actual* backend, not a guess at what its event stream
+      looks like), and is considered sufficient to trust this fix in the
+      meantime.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
