@@ -1202,7 +1202,35 @@ export function handleOpEvent(msg) {
       const entry = resourceIndex.get(msg.resource);
       if (entry) {
         gantryGroup.attach(entry.group);
-        carriedPlate = new CarriedPlate(msg.resource, { x: msg.x, y: msg.y, z: msg.z });
+        // Reuses the *existing* CarriedPlate when this pickup is for the
+        // same resource one was already wrapping -- which, in practice,
+        // is every pickup: a real gripper can only ever hold one resource
+        // at a time, so a *different* `msg.resource` here would mean the
+        // previous one's own drop already ran (see that case's own
+        // comment on why it never nulls `carriedPlate` out). Replacing it
+        // unconditionally used to discard whatever motion legs the
+        // *previous* drop had just enqueued but hadn't finished playing
+        // out yet -- routine, since this pickup's own event typically
+        // arrives well before that ~1.1s animation completes (the same
+        // "no reason for the backend to wait" timing this whole case's
+        // own comment already describes) -- and re-seed a brand new
+        // MotionUnit straight from this pickup's own msg.x/y/z. Since
+        // that's the resource's real *final* destination (correct), but
+        // the group was still visually rendering wherever the interrupted
+        // old MotionUnit had frozen mid-tween (also correct, in isolation
+        // -- reparenting alone never jumps), the *next* leg's very first
+        // tick recomputed the group's position from the new MotionUnit's
+        // fresh (and different) starting point -- an instant, visible
+        // snap to the destination with no travel animation at all
+        // (user-reported: "the plate appears to just move by itself...
+        // teleport to TC"). Reusing the same instance instead means its
+        // queue just keeps draining (and gets more legs appended, same as
+        // any Channel's own queue across back-to-back ops) with no
+        // discontinuity, regardless of how quickly pickups and drops
+        // alternate.
+        if (!carriedPlate || carriedPlate.resourceName !== msg.resource) {
+          carriedPlate = new CarriedPlate(msg.resource, { x: msg.x, y: msg.y, z: msg.z });
+        }
       }
       // Pads aren't already on these channels -- a real prior leg (see
       // STAR_backend.py's own `if self.core_parked: await self.

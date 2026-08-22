@@ -3212,6 +3212,48 @@ a real second bug, not just a misreading:
       renders as one coherent cluster instead of the gripping pair visibly
       floating away from the rest).
 
+Second follow-up, same round -- user-reported: "the plate appears to just
+move by itself. It seems to teleport to TC and then move from TC to
+`plate_carrier[0]`, completely desync from the pipettes."
+
+- [x] **Root cause: a brand-new `CarriedPlate` replaced the in-flight one
+      on every pickup.** `core_pick_up_resource`'s handler unconditionally
+      did `carriedPlate = new CarriedPlate(msg.resource, {x: msg.x, y:
+      msg.y, z: msg.z})` -- fine for the *first* pickup, but for every
+      pickup after the first drop, this discarded whatever motion legs
+      the *previous* drop had just enqueued but hadn't finished playing
+      out yet (routine: the very next pickup's own event typically arrives
+      well before that ~1.1s animation completes -- same "no reason for
+      the backend to wait" timing already established for the reparent
+      race two rounds ago). The group's rendered position stayed frozen
+      wherever the orphaned old `MotionUnit` had gotten to; the *new*
+      one's first leg then jumped straight from that frozen point to its
+      own fresh seed value (the resource's real final destination) the
+      instant it started ticking -- an instant, visible snap with no
+      travel animation, for every move except the very first (nothing to
+      interrupt) and the very last (nothing after it to interrupt it) --
+      exactly matching "teleport to TC [the middle move], then [the last
+      move] move from TC to plate_carrier[0]."
+- [x] **Fix**: reuse the existing `CarriedPlate` instance when a pickup is
+      for the same resource one was already wrapping (in practice, every
+      pickup -- a real gripper only ever holds one resource at a time).
+      Its queue just keeps draining, and gets more legs appended, exactly
+      the way any `Channel`'s own queue already handles back-to-back ops
+      with no discontinuity.
+- [x] Verified with a new deterministic Node test (`pickup1 -> drop1 ->
+      pickup2 -> drop2`, with a little real ticking interleaved between
+      each -- enough for drop1's own legs to be genuinely mid-flight when
+      pickup2 fires, the actual race, not literally zero ticks which
+      never reproduced it): confirmed the test fails against the
+      pre-fix code with a precise measured 224mm jump on the exact tick
+      `drop2` fires, and passes post-fix with only an ordinary ~21mm
+      eased-interpolation step at that same tick. Also verified live
+      end-to-end: dense position polling (1000 samples over a full
+      20s run) showed 157 genuinely distinct in-flight positions and a
+      maximum single-tick step of 56.7mm (consistent with ordinary fast
+      interpolation, nowhere near teleport-scale), correctly starting and
+      ending at the real `plate_carrier_1-0` coordinate.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
