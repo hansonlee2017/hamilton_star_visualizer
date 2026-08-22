@@ -3166,6 +3166,52 @@ this demo and `thermocycler_demo.py`.
       ODTC block's rendered geometry height matched the real
       `child_location.z` exactly.
 
+Follow-up from the same round -- user question ("channels 6/7 should be
+*more front* than 0/1, but the animation looked like the opposite") led to
+a real second bug, not just a misreading:
+
+- [x] **Per-channel colors, for legibility**: every `Channel.body` now gets
+      its own distinct hue (`channelColor()`, evenly spaced around the HSL
+      wheel by index, cached as `this.bodyColor` so `pulse()` has the right
+      color to revert to) instead of one shared grey -- purely a visual aid
+      (per user direction) so which physical channel is doing what is
+      legible in the rendered scene itself, not just via a JS console
+      query. This is what actually made the bug below visible at a glance.
+- [x] **Confirmed the underlying channel-index-to-Y convention is correct**
+      (channel 0 = largest y = "back" = row A; channel 7 = smallest y =
+      "front" = row H) via two independent live checks: `channels[i].pos.y`
+      read straight from a fresh `ensureChannels(8)` (`[0, -9, -18, ...,
+      -63]`, strictly decreasing), and a real `cor_96_wellplate_360uL_Fb`'s
+      own row A-H absolute y's (`74.2` down to `11.2`, same direction) --
+      and that the default CoRe-gripper pair (`core_front_channel=7` ->
+      `back_channel=6`/`front_channel=7`) is correctly the two *highest*-
+      index (most-front) channels, not 0/1.
+- [x] **The real bug: idle channels 0-5 weren't repositioned at all during
+      a gripper stop**, just left at whatever y they last happened to be
+      at (their own historical rest/op position) while channels 6/7 jumped
+      to the resource's own y -- confirmed live: gripping at y=250/170
+      while channels 0-5 sat untouched at y=0..-45, i.e. channel 6 alone
+      reading as *more toward the back* than every other channel, simply
+      because a resource's y is usually nowhere near wherever 0-5 last
+      were. Fixed by reusing `resolveChannelYs()` (gantry-planning.js) --
+      the exact same "some channels have fixed targets, everyone else gets
+      nudged off their own current y, respecting `CHANNEL_PITCH_MM` and
+      index ordering" solver `planGantryPasses()` already uses for
+      ordinary multi-channel ops -- via a new `resolvedGripperYs()`, called
+      from both `gripResourceTargets()` and a new `padTargets()`'s own
+      matching fix (also gave the pad-attach/return stop's two channels a
+      real 18mm span instead of literally the same y, sourced from
+      `hamilton_core_gripper_1000uL_5mL_on_waste()`'s own
+      `back_channel_y_center=39.5`/`front_channel_y_center=21.5` --
+      `resolveChannelYs()` would otherwise throw on two adjacent-index
+      channels fixed to the identical y, an unreachable pitch violation).
+      Verified live: after the fix, channels 0-5 stack in a proper
+      9mm-pitch ladder immediately behind channel 6 (`304.2, 295.2, ...,
+      259.2, 250.2`) instead of scattered at arbitrary unrelated positions
+      -- confirmed both numerically and visually (the whole gantry now
+      renders as one coherent cluster instead of the gripping pair visibly
+      floating away from the rest).
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

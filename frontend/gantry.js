@@ -92,6 +92,23 @@ const CHANNEL_TIP_HEIGHT = TIP_PYRAMID_HEIGHT * 2.2;
 const CORE_GRIPPER_PAD_SIZE_MM = 10;
 const CORE_GRIPPER_PAD_HEIGHT_MM = 14;
 
+// Per-channel body color, evenly spaced around the hue wheel -- purely a
+// visual aid (per user direction: "highlight the channels with different
+// colors for easier visual differentiation") so which physical channel
+// index is doing what is legible at a glance in the browser instead of
+// requiring a JS console query, especially useful for a CoRe-gripper op
+// (where only two of the eight -- typically 6/7 -- are ever the ones
+// actually gripping, and confirming *which* two visually otherwise means
+// eyeballing near-identical grey cylinders). `NUM_CHANNELS_DEFAULT`, not
+// this particular head's own `numChannels` (unknown to a single Channel
+// instance, which only ever sees its own `index`) -- every demo in this
+// repo uses 8 channels anyway, and a slightly denser hue spacing on some
+// hypothetical smaller head is a harmless cosmetic difference, not a
+// correctness issue the way an actual position/timing value would be.
+function channelColor(index) {
+  return new THREE.Color().setHSL(index / NUM_CHANNELS_DEFAULT, 0.55, 0.55).getHex();
+}
+
 export class Channel {
   constructor(index) {
     this.index = index;
@@ -129,7 +146,11 @@ export class Channel {
     // a to-scale glyph is nearly invisible against a ~1m deck, and legibility
     // matters more here than strict scale accuracy for this one part.
     const bodyGeom = new THREE.CylinderGeometry(7, 7, 32, 12);
-    this.body = new THREE.Mesh(bodyGeom, new THREE.MeshLambertMaterial({ color: 0x9aa0a8 }));
+    // Own distinct hue per channel -- see channelColor()'s own comment.
+    // Cached on the instance (not just recomputed inline) since pulse()
+    // needs the exact same value to revert to afterward.
+    this.bodyColor = channelColor(index);
+    this.body = new THREE.Mesh(bodyGeom, new THREE.MeshLambertMaterial({ color: this.bodyColor }));
     this.body.position.y = 16;
     this.group.add(this.body);
 
@@ -229,7 +250,7 @@ export class Channel {
 
   pulse() {
     this.body.material.color.copy(PULSE_COLOR);
-    setTimeout(() => this.body.material.color.setHex(0x9aa0a8), 250 * getDurationScale());
+    setTimeout(() => this.body.material.color.setHex(this.bodyColor), 250 * getDurationScale());
   }
 
   // direction: +1 to scroll "up" (aspirate -- liquid entering the tip,
@@ -944,34 +965,87 @@ function animateGripperStop(x, targetYFor, targetZFor, onArriveChannel, onArrive
   core96Head.enqueue({ x: headX, y: null, z: restZ }, scaled(DESCEND_MS));
 }
 
+// Resolves a proper hardware-feasible y for *every* channel at a gripper
+// stop, not just the two participating ones left wherever they happened
+// to be -- reuses `resolveChannelYs()` (gantry-planning.js), the exact
+// same "some channels have fixed targets, everyone else gets nudged off
+// their own current position, respecting CHANNEL_PITCH_MM and channel-
+// index ordering" solver `planGantryPasses()` already uses for ordinary
+// multi-channel ops. Without this, the other 6 channels simply kept
+// whatever y they last happened to be at (their own historical rest/op
+// position, entirely unrelated to this stop's target) while the two
+// gripping channels jumped to the resource's own y -- since a resource's
+// y is usually nowhere near where the other 6 last were, they could end
+// up *further back* (larger y) than the actively gripping pair, an
+// obviously physically-impossible arrangement for 8 channels sharing one
+// mechanism (user-reported, and confirmed live: channels 6/7 gripping at
+// y=250/170 while channels 0-5 sat untouched at y=0..-45 -- channel 6
+// alone reading as "more toward the back" than every other channel).
+function resolvedGripperYs(backChannel, frontChannel, backY, frontY) {
+  const channelIndices = channels.map((_, i) => i);
+  const fixedY = new Map([
+    [backChannel, backY],
+    [frontChannel, frontY],
+  ]);
+  const preferredY = new Map(
+    channelIndices.filter((i) => i !== backChannel && i !== frontChannel).map((i) => [i, channels[i].pos.y])
+  );
+  try {
+    return resolveChannelYs(channelIndices, fixedY, preferredY, CHANNEL_PITCH_MM);
+  } catch {
+    // Same "give up and just use the raw values" fallback
+    // planGantryPasses() itself falls back to when a stop's fixed targets
+    // are mutually incompatible -- shouldn't actually be reachable for
+    // either caller below (both always give backY > frontY by at least
+    // 2*CHANNEL_PITCH_MM, comfortably more than the minimum pitch a
+    // single index-step apart requires), but costs nothing to guard
+    // against a future change to those constants breaking that margin.
+    const map = new Map(preferredY);
+    map.set(backChannel, backY);
+    map.set(frontChannel, frontY);
+    return map;
+  }
+}
+
 // targetYFor/targetZFor for a stop where the two gripper channels
 // straddle a *resource* (the plate/rack being picked up, moved, or
 // dropped) -- back at +CORE_GRIP_HALF_SPAN_MM, front at
 // -CORE_GRIP_HALF_SPAN_MM (mirrors Channel's own back/front convention --
 // see that class's constructor comment: channel 0 is back-most, increasing
 // index moves toward front/-y), descending to the resource's own z plus
-// CORE_GRIP_CHANNEL_Z_OFFSET_MM. Every other channel keeps its own current
-// y and stays at restZ (see animateGripperStop()'s own docstring).
+// CORE_GRIP_CHANNEL_Z_OFFSET_MM. Every other channel gets a real resolved
+// y (see resolvedGripperYs()) and stays at restZ.
 function gripResourceTargets(backChannel, frontChannel, y, z) {
+  const ys = resolvedGripperYs(backChannel, frontChannel, y + CORE_GRIP_HALF_SPAN_MM, y - CORE_GRIP_HALF_SPAN_MM);
   return {
-    targetYFor: (i) =>
-      i === backChannel ? y + CORE_GRIP_HALF_SPAN_MM : i === frontChannel ? y - CORE_GRIP_HALF_SPAN_MM : channels[i].pos.y,
+    targetYFor: (i) => ys.get(i),
     targetZFor: (i) => (i === backChannel || i === frontChannel ? z + CORE_GRIP_CHANNEL_Z_OFFSET_MM : restZ),
   };
 }
 
 // targetYFor/targetZFor for a stop at core_grippers itself (attaching or
-// returning the pads) -- both channels target the same (padY, padZ) point
-// (no straddle span the way gripResourceTargets() has: `core_grippers` is
-// a small compact fixture, not a full plate footprint to straddle across
-// -- see CORE_GRIP_HALF_SPAN_MM's own "not sourced from any real per-
-// resource grip-width calculation" comment for the same approximation
-// bar). `padZ` may be omitted (a deck without a `core_grippers` resource
-// -- see visualizer_backend.py's own `_core_grippers_point()`), in which
-// case this stop just travels in x/y at restZ rather than descending.
+// returning the pads) -- back/front straddle padY by
+// +-CORE_GRIP_PAD_HALF_SPAN_MM (a real sourced value, unlike
+// CORE_GRIP_HALF_SPAN_MM's own resource-straddle approximation: Hamilton's
+// own `hamilton_core_gripper_1000uL_5mL_on_waste()` fixture reports
+// `back_channel_y_center=39.5`/`front_channel_y_center=21.5`, an 18mm gap
+// -- `2 * CORE_GRIP_PAD_HALF_SPAN_MM` matches that exactly). Every other
+// channel gets a real resolved y here too, same as gripResourceTargets()
+// -- not left behind at an arbitrary y the way this stop's two channels
+// themselves used to be before this pad-travel leg existed at all. `padZ`
+// may be omitted (a deck without a `core_grippers` resource -- see
+// visualizer_backend.py's own `_core_grippers_point()`), in which case
+// this stop just travels in x/y at restZ rather than descending.
+const CORE_GRIP_PAD_HALF_SPAN_MM = 9;
 function padTargets(backChannel, frontChannel, padY, padZ) {
+  const ys = resolvedGripperYs(
+    backChannel,
+    frontChannel,
+    padY + CORE_GRIP_PAD_HALF_SPAN_MM,
+    padY - CORE_GRIP_PAD_HALF_SPAN_MM
+  );
   return {
-    targetYFor: (i) => (i === backChannel || i === frontChannel ? padY : channels[i].pos.y),
+    targetYFor: (i) => ys.get(i),
     targetZFor: (i) =>
       i === backChannel || i === frontChannel
         ? (padZ != null ? padZ + CORE_GRIP_CHANNEL_Z_OFFSET_MM : restZ)
