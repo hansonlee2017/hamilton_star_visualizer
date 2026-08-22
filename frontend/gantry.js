@@ -1137,20 +1137,50 @@ function gantryRemainingMs() {
 // the only callers) wait for the gantry to finish whatever it's currently
 // doing before its *next* enqueued task (the real animation the caller is
 // about to queue right after this) starts playing -- see
-// gantryRemainingMs()'s own docstring for the race this closes. A live
-// condition (see AnimationQueue's own `waitUntil` task type), not a
-// precomputed duration: the old version of this function snapshotted
-// gantryRemainingMs() once and enqueued a fixed-duration hold sized to
-// it, which -- see docs/PLAN.md's "Review round 44"/"45" -- had to be
-// recomputed exactly right and couldn't react if more work got added to
-// the gantry after the snapshot was taken. A live condition can't be
-// wrong this way: it simply doesn't complete until the gantry actually
-// has caught up, however long that turns out to take. Harmless to call
-// unconditionally, even when the gantry's already caught up (the common
-// case) -- an always-true condition completes on its very next tick, no
-// different in practice from not waiting at all.
+// gantryRemainingMs()'s own docstring for the race this closes.
+//
+// A precomputed duration, snapshotted *now* -- deliberately not a live
+// `waitUntil` condition (a task type AnimationQueue briefly grew, then
+// removed again -- see that file's own header comment), despite that
+// being exactly what this function used earlier in the very same round
+// that introduced it. The reasoning for switching to `waitUntil`
+// (self-correcting, doesn't need a number recomputed exactly right --
+// see docs/PLAN.md's "Review round 44"/"45") is real, but doesn't apply
+// to *this* particular wait: channels are a shared resource that every
+// future CoRe-gripper op
+// for the rest of the whole run keeps adding more legs to (every
+// gripper stop drags all 8 channels along -- see animateGripperStop()'s
+// own docstring), and every op event for an entire run arrives
+// essentially all at once, well before any of them finishes animating
+// (the same gap this whole mechanism exists to bridge in the first
+// place). A `waitUntil: () => gantryRemainingMs() === 0` condition,
+// re-evaluated on every real frame, doesn't distinguish "backlog that
+// existed when I was enqueued" from "backlog added by op events that
+// arrived *after* me but were already fed into channels' own queues
+// before any of this ever got a chance to tick" -- it only completes once
+// channels are *entirely* empty, i.e. once the whole rest of the run's
+// own channel activity has finished too, not just whatever came before
+// this thermocycler op (user-reported: "all the ODTC animations only
+// happen after all the pipetting is done" -- and, since later
+// CoRe-gripper moves keep extending the channels' own queue further
+// still, effectively after everything else in the entire run, not just
+// the fill; confirmed live: a captured pcr_setup_demo.py event stream,
+// replayed through the real frontend modules, showed the thermocycler's
+// own lid only starting to move at frame 3662, *after* frame 3635 --
+// the exact frame channels finally went idle across the *entire* run --
+// not after the ~43.8s fill+cap backlog that actually preceded the first
+// thermocycler_open_lid event). A snapshot doesn't have this problem:
+// what was queued on the gantry *before this specific op's own event
+// arrived* is a fixed, already-fully-determined quantity the moment this
+// runs, immune to whatever gets queued on channels afterward -- exactly
+// the class of information a live poll can't help but see, evaluated as
+// it is on some future frame, long after every other event has already
+// been fed in.
 function waitForGantry(entry) {
-  entry.animQueue.enqueue({ waitUntil: () => gantryRemainingMs() === 0 });
+  const preexistingMs = gantryRemainingMs();
+  if (preexistingMs > 0) {
+    entry.animQueue.enqueue({ duration: preexistingMs, onTick: () => {} });
+  }
 }
 
 export function handleOpEvent(msg) {

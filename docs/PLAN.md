@@ -3811,6 +3811,79 @@ patch.
       above is considered sufficient to trust this fix in the meantime,
       per that same established reasoning.
 
+## Review round 47
+
+User feedback after "Review round 46" landed: "All the pipetting steps
+and plate moving are fine. But for some reason, all the ODTC animations
+only happens after all the pipetting is done." A regression introduced
+by that same round's own `waitUntil` change to `waitForGantry()` -- the
+one piece of the round-46 redesign that *wasn't* an architectural
+improvement, found via the same faithful replay technique.
+
+- [x] **Root cause**: `waitForGantry()`'s new live `waitUntil:
+      () => gantryRemainingMs() === 0` condition is re-evaluated on every
+      real frame -- but by the time it's ever actually ticked, *every* op
+      event for the entire run has already arrived and been fed into the
+      channels' own queues (the same "events arrive essentially
+      instantly, animation takes real time" gap this whole mechanism
+      exists to bridge). Channels are a shared resource every future
+      CoRe-gripper op keeps adding more legs to (every gripper stop drags
+      all 8 channels along), so a condition that only completes once
+      channels are *entirely* empty doesn't distinguish "backlog that
+      existed when this thermocycler op's own event arrived" from
+      "backlog added by later, unrelated op events that happened to
+      arrive first" -- it ends up waiting for the whole rest of the
+      run's own channel activity, not just whatever preceded it.
+      Confirmed live: a captured `pcr_setup_demo.py` event stream,
+      replayed through the real frontend modules, showed the
+      thermocycler's own lid only starting to move at the exact frame
+      channels finally went idle across the *entire* run (frame 3635,
+      60.6s) -- not after the ~43.8s fill+cap backlog that actually
+      preceded the first `thermocycler_open_lid` event.
+- [x] The reasoning behind switching to `waitUntil` in the first place
+      (self-correcting, no precomputed number to get wrong -- see
+      "Review round 44"/"45"'s own recurring bugs) is real, but doesn't
+      apply here: those earlier bugs were all about a resource's own
+      *self-referential* backlog (its own prior queue, accumulating
+      across repeated pickups of the *same* resource) being double-
+      counted or dropped -- a genuinely moving target a live condition
+      helps with. `waitForGantry()`'s own wait was never self-referential
+      like that (the thermocycler's `animQueue` has nothing to do with
+      channels' own backlog) -- a plain snapshot, taken once at the exact
+      moment this specific op's event arrives, was always the correct
+      tool for it, and never actually had a bug before this round
+      introduced one by "fixing" something that wasn't broken.
+- [x] **Fix**: `waitForGantry()` reverted to snapshotting
+      `gantryRemainingMs()` once, at enqueue time, and enqueuing a plain
+      fixed-duration wait sized to it -- immune to whatever gets queued on
+      channels afterward, since "what was already there" is a fixed
+      quantity the moment this runs, not something a live poll evaluated
+      on some arbitrary future frame can help but also see. `waitUntil`
+      itself -- now with zero remaining callers anywhere in this
+      codebase, and a demonstrated case where its own self-correcting
+      framing is actively the wrong mental model -- was removed from
+      `AnimationQueue` entirely (`animation-queue.js`, plus its own unit
+      tests) rather than left as unused, attractive-but-footgun
+      infrastructure a future change could reach for again and reproduce
+      this same bug with.
+- [x] Verified with the same faithful event-capture-and-replay technique:
+      re-ran against `pcr_setup_demo.py`'s captured stream and confirmed
+      the thermocycler's own lid now starts moving at 46.0s -- well
+      before channels finally go idle across the whole run at 60.6s, and
+      still correctly after the ~43.8s fill+cap backlog that precedes it.
+      Added this as a permanent check (not just a one-off diagnostic) to
+      the replay test alongside every other "Review round 46" check,
+      which all still pass unchanged: pipettes still finish before the
+      lid/plate's own first movement, the lid and plate still move
+      together on the same real frames, the full round trip still lands
+      exactly on the original position, no teleport. Re-verified
+      `core_gripper_demo.py`'s own simpler case too. All 30 unit tests
+      (back down from 34 once `waitUntil`'s own dedicated coverage was
+      removed along with it) pass.
+- [x] Live browser verification remains blocked by the same environment-
+      level constraint prior rounds documented; the replay technique
+      above is considered sufficient to trust this fix in the meantime.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

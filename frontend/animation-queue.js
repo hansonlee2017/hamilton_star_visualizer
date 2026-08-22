@@ -17,6 +17,26 @@
 // raw `t` fed straight into a sine wave (easing it would distort the
 // oscillation instead of just changing its pacing) -- baking one policy
 // into this generic queue would have been wrong for the other caller.
+//
+// Once briefly grew a second, `waitUntil: () => boolean` task shape (a
+// live condition, re-polled every frame, instead of a precomputed
+// duration) for gantry.js's own waitForGantry() -- see that function's
+// own current docstring for why it turned out to be the wrong tool there:
+// channels are a shared resource every future CoRe-gripper op for the
+// rest of a whole run keeps adding more legs to, and every op event for
+// an entire run arrives essentially all at once, well before any of them
+// finishes animating -- so a live "is the gantry empty yet" condition,
+// evaluated on whatever future frame it first gets ticked, doesn't
+// distinguish "backlog that existed when I was enqueued" from "backlog
+// added by events that arrived after me but were already fed in before
+// any of this got a chance to tick" -- it only ever completes once the
+// *entire* rest of the run's own channel activity has finished too
+// (confirmed live: pushed a thermocycler's lid-open animation all the way
+// to the very end of a whole demo run, not just past the fill it was
+// actually supposed to wait for). Removed rather than left as unused,
+// demonstrated-footgun infrastructure -- a precomputed snapshot, taken at
+// the exact moment the thing it's waiting on needs to know "what's
+// already there," has no future to accidentally see.
 
 export class AnimationQueue {
   constructor() {
@@ -29,10 +49,6 @@ export class AnimationQueue {
   //   onStart?: () => void,
   //   onTick: (t: number) => void,   // t in [0, 1], linear
   //   onComplete?: () => void,
-  // } | {
-  //   waitUntil: () => boolean,
-  //   onStart?: () => void,
-  //   onComplete?: () => void,
   // }
   //
   // `duration` may be a function -- resolved once, right when this task
@@ -42,19 +58,6 @@ export class AnimationQueue {
   // captured at enqueue time can be stale by the time this task's turn
   // actually comes, e.g. a duration that depends on getDurationScale() and
   // the HUD's speed dropdown changed in between.
-  //
-  // `waitUntil` is a different kind of task entirely: no `duration`/
-  // `onTick`, just a condition re-checked every real frame, completing the
-  // instant it first returns true -- see update()'s own handling. Meant
-  // for "don't start my *next* real task until some other queue/condition
-  // elsewhere has caught up" (e.g. gantry.js's waitForGantry()), where a
-  // *precomputed* duration is the wrong tool: it has to be recomputed
-  // correctly at the exact right moment, can't react if more work gets
-  // added to the thing being waited on after it was computed, and (see
-  // docs/PLAN.md's "Review round 44"/"Review round 45") is exactly the
-  // class of bug a fixed-duration hold kept reintroducing. A live
-  // condition is self-correcting by construction: it simply doesn't
-  // complete until it's actually true, however long that ends up taking.
   enqueue(task) {
     this._queue.push(task);
   }
@@ -71,29 +74,21 @@ export class AnimationQueue {
   // caller *outside* this queue's own owner find out how long it'll stay
   // busy without reaching into private state itself (see gantry.js's own
   // gantryRemainingMs(), used to make an unrelated animation -- the
-  // thermocycler's lid-slide/shimmer, or a fresh CoRe-gripper pickup's
-  // own hold -- wait for the rest of the scene to visually catch up
-  // first, instead of starting the instant its own op event arrives).
-  // Assumes every task's own `duration` is (or, for the currently-
-  // running one, already resolved to -- see update()'s own function-
-  // duration handling) a plain number; a still-queued task with a
-  // function-valued duration (this queue supports those -- see
+  // thermocycler's lid-slide/shimmer -- wait for the rest of the gantry
+  // to visually catch up first, instead of starting the instant its own
+  // op event arrives). Assumes every task's own `duration` is (or, for
+  // the currently-running one, already resolved to -- see update()'s own
+  // function-duration handling) a plain number; a still-queued task with
+  // a function-valued duration (this queue supports those -- see
   // enqueue()'s own docstring -- thermocycler.js's lid-slide/shimmer
   // tasks use them) contributes 0 here rather than being called early,
   // which would run it before its own onStart. No caller in this
   // codebase currently reads remainingMs on a queue that also has
   // function-valued tasks queued (only ticked, never introspected this
   // way), so this is a documented limitation, not an active bug.
-  //
-  // A `waitUntil` task -- active or still queued -- also contributes 0,
-  // for the same reason: its real duration isn't knowable in advance
-  // (that's the whole point of it being a live condition, not a
-  // precomputed number). Any *fixed*-duration task queued behind it still
-  // counts normally, since its own duration is known regardless of how
-  // long the wait ahead of it takes.
   get remainingMs() {
     let total = 0;
-    if (this._current && !this._current.waitUntil) {
+    if (this._current) {
       total += Math.max(0, this._current.duration - this._current.elapsed);
     }
     for (const task of this._queue) {
@@ -106,28 +101,14 @@ export class AnimationQueue {
     if (!this._current) {
       this._current = this._queue.shift();
       if (this._current) {
+        this._current.elapsed = 0;
         this._current.onStart?.();
-        if (!this._current.waitUntil) {
-          this._current.elapsed = 0;
-          if (typeof this._current.duration === "function") {
-            this._current.duration = this._current.duration();
-          }
+        if (typeof this._current.duration === "function") {
+          this._current.duration = this._current.duration();
         }
       }
     }
     if (!this._current) return;
-
-    if (this._current.waitUntil) {
-      // No `elapsed`/`duration`/`onTick` bookkeeping at all -- just poll
-      // the condition every real frame and complete the instant it's
-      // first true, however many frames that takes.
-      if (this._current.waitUntil()) {
-        const { onComplete } = this._current;
-        this._current = null;
-        onComplete?.();
-      }
-      return;
-    }
 
     this._current.elapsed += dtMs;
     const t = Math.min(1, this._current.elapsed / this._current.duration);
