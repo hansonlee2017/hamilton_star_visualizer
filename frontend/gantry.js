@@ -1141,45 +1141,53 @@ function gantryRemainingMs() {
 //
 // A precomputed duration, snapshotted *now* -- deliberately not a live
 // `waitUntil` condition (a task type AnimationQueue briefly grew, then
-// removed again -- see that file's own header comment), despite that
-// being exactly what this function used earlier in the very same round
-// that introduced it. The reasoning for switching to `waitUntil`
-// (self-correcting, doesn't need a number recomputed exactly right --
-// see docs/PLAN.md's "Review round 44"/"45") is real, but doesn't apply
-// to *this* particular wait: channels are a shared resource that every
-// future CoRe-gripper op
-// for the rest of the whole run keeps adding more legs to (every
-// gripper stop drags all 8 channels along -- see animateGripperStop()'s
-// own docstring), and every op event for an entire run arrives
-// essentially all at once, well before any of them finishes animating
-// (the same gap this whole mechanism exists to bridge in the first
-// place). A `waitUntil: () => gantryRemainingMs() === 0` condition,
-// re-evaluated on every real frame, doesn't distinguish "backlog that
-// existed when I was enqueued" from "backlog added by op events that
-// arrived *after* me but were already fed into channels' own queues
-// before any of this ever got a chance to tick" -- it only completes once
-// channels are *entirely* empty, i.e. once the whole rest of the run's
-// own channel activity has finished too, not just whatever came before
-// this thermocycler op (user-reported: "all the ODTC animations only
-// happen after all the pipetting is done" -- and, since later
-// CoRe-gripper moves keep extending the channels' own queue further
-// still, effectively after everything else in the entire run, not just
-// the fill; confirmed live: a captured pcr_setup_demo.py event stream,
-// replayed through the real frontend modules, showed the thermocycler's
-// own lid only starting to move at frame 3662, *after* frame 3635 --
-// the exact frame channels finally went idle across the *entire* run --
-// not after the ~43.8s fill+cap backlog that actually preceded the first
-// thermocycler_open_lid event). A snapshot doesn't have this problem:
-// what was queued on the gantry *before this specific op's own event
-// arrived* is a fixed, already-fully-determined quantity the moment this
-// runs, immune to whatever gets queued on channels afterward -- exactly
-// the class of information a live poll can't help but see, evaluated as
-// it is on some future frame, long after every other event has already
-// been fed in.
+// removed again -- see that file's own header comment): channels are a
+// shared resource every future CoRe-gripper op for the rest of the whole
+// run keeps adding more legs to, and every op event for an entire run
+// arrives essentially all at once, well before any of them finishes
+// animating -- so a live "is the gantry empty yet" condition doesn't
+// distinguish "backlog that existed when I was enqueued" from "backlog
+// added by events that arrived after me but were already fed in before
+// any of this got a chance to tick," and wound up waiting for the whole
+// rest of the run instead of just what preceded it (see "Review round
+// 47"). A snapshot doesn't have that problem: what was queued on the
+// gantry *before this specific op's own event arrived* is a fixed,
+// already-fully-determined quantity the moment this runs.
+//
+// `entry.animQueue`'s own already-queued backlog is subtracted out,
+// though -- this whole run's own thermocycler calls fire close together
+// (open_lid, close_lid, run_protocol, open_lid again -- see
+// pcr_setup_demo.py), each calling this function in turn, all in the same
+// "every op event arrives before any of them finishes animating" burst.
+// `gantryRemainingMs()` is an *absolute* quantity, measured fresh from
+// "now" on every call -- but every one of *this queue's own* earlier
+// wait+animation tasks (from an earlier waitForGantry() call plus
+// whatever real animation followed it) also takes real time to play out,
+// during which the channels keep draining the *same* backlog a later
+// call's own fresh gantryRemainingMs() snapshot would otherwise measure
+// all over again. Enqueuing the raw absolute value on top of this
+// queue's own already-queued backlog re-counted time that was never
+// actually still outstanding -- exactly the same double-counting
+// docs/PLAN.md's "Review round 45" already fixed once for
+// holdCarriedPlate(), just recurring here for entry.animQueue instead of
+// a carried resource's own queue (confirmed live: a captured
+// pcr_setup_demo.py event stream, replayed through the real frontend
+// modules, showed thermocycler_1's own animQueue holding a combined
+// ~189.5s of queued waits+animations moments after every op event was
+// fed in -- close_lid/run_protocol/the second open_lid's own animations
+// were never actually skipped, just each pushed enormously further out
+// by a redundant wait stacked on top of the last one, reading as
+// "skipped" to anyone not watching for over three minutes). Subtracting
+// `entry.animQueue.remainingMs` converts the absolute snapshot into the
+// actual remaining deficit -- 0 whenever this queue's own already-queued
+// backlog already outlasts the gantry's (the common case for every
+// thermocycler call after the first one in a burst like this), and only
+// the genuine shortfall (new channel work queued since the last call)
+// otherwise.
 function waitForGantry(entry) {
-  const preexistingMs = gantryRemainingMs();
-  if (preexistingMs > 0) {
-    entry.animQueue.enqueue({ duration: preexistingMs, onTick: () => {} });
+  const holdMs = Math.max(0, gantryRemainingMs() - entry.animQueue.remainingMs);
+  if (holdMs > 0) {
+    entry.animQueue.enqueue({ duration: holdMs, onTick: () => {} });
   }
 }
 

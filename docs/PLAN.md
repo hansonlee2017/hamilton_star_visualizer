@@ -3884,6 +3884,77 @@ improvement, found via the same faithful replay technique.
       level constraint prior rounds documented; the replay technique
       above is considered sufficient to trust this fix in the meantime.
 
+## Review round 48
+
+User feedback immediately after "Review round 47" landed: "The ODTC
+close_lid, run_protocol and open_lid animations are all skipped. I only
+see one open_lid operation." Not actually skipped -- a second instance of
+"Review round 45"'s own self-referential double-counting bug, recurring
+in `waitForGantry()`'s brand new snapshot fix instead of
+`holdCarriedPlate()` this time, found via the same faithful replay
+technique.
+
+- [x] **Root cause**: `pcr_setup_demo.py`'s thermocycler calls (open_lid,
+      close_lid, run_protocol, open_lid again) all fire in the same
+      "every op event arrives before any of them finishes animating"
+      burst, each calling `waitForGantry()` in turn, all enqueuing onto
+      the *same* `thermocycler_1.animQueue`. `gantryRemainingMs()` is an
+      *absolute* snapshot, measured fresh on every call -- but each of
+      this queue's own *earlier* wait+animation tasks (from the previous
+      `waitForGantry()` call, plus whatever real animation followed it)
+      also takes real time to play out, during which channels keep
+      draining the *same* backlog a later call's own fresh snapshot would
+      otherwise measure all over again. Enqueuing the raw absolute value
+      on top of this queue's own already-queued backlog re-counted time
+      that was never actually still outstanding. Confirmed live: a
+      captured `pcr_setup_demo.py` event stream, replayed through the real
+      frontend modules, showed `thermocycler_1.animQueue.remainingMs`
+      holding a combined ~189.5s of queued waits+animations moments after
+      every op event was fed in -- close_lid/run_protocol/the second
+      open_lid's own animations were never actually skipped, just each
+      pushed enormously further out by a redundant wait stacked on top of
+      the last one, reading as "skipped" to anyone not watching for over
+      three minutes.
+- [x] **Fix**: `waitForGantry()` now subtracts `entry.animQueue`'s own
+      already-queued `remainingMs` from the `gantryRemainingMs()`
+      snapshot -- `Math.max(0, gantryRemainingMs() - entry.animQueue.
+      remainingMs)` -- converting the absolute quantity into the actual
+      remaining deficit, exactly the same fix shape "Review round 45"
+      already established for `holdCarriedPlate()`'s analogous bug (just
+      recurring here for a thermocycler's own `animQueue` instead of a
+      carried resource's). 0 whenever this queue's own already-queued
+      backlog already outlasts the gantry's own (the common case for
+      every thermocycler call after the first one in a burst like this),
+      and only the genuine shortfall (new channel work queued since the
+      last call) otherwise.
+- [x] Verified with the same faithful replay technique: re-ran against
+      the captured `pcr_setup_demo.py` stream and confirmed
+      `thermocycler_1.animQueue.remainingMs` right after all events are
+      fed dropped from ~189.5s to 48.2s (matching the channels' own real
+      backlog), and the full open/close/shimmer/open sequence now plays
+      out completely -- all four real stages observed in the correct
+      order, at the correct simulated timestamps -- within ~56s total
+      (matching the channels' own real backlog) instead of ~196s. Added a
+      permanent bounded-backlog check to the replay test (catches any
+      future recurrence of this exact stacking pattern) alongside every
+      "Review round 46"/"47" check, which all still pass unchanged. All
+      30 unit tests pass.
+- [x] A methodology note for anyone re-running this project's own replay
+      tests: `THREE.Vector3.equals()` does *exact* floating-point
+      comparison, not approximate -- a lerp-based tween that
+      algebraically lands exactly on its target can still leave a
+      residual sub-epsilon rounding error, making `.equals()` spuriously
+      report "not there yet" even when the position is visually identical
+      (confirmed live: an early version of this round's own diagnostic
+      script, using `.equals()` directly, wrongly concluded the
+      close/shimmer/second-open stages never played at all -- they did,
+      the check itself was just too strict). Comparing with `.distanceTo(
+      ...) < 1e-6` instead is what this project's own replay tests now
+      use for "did this tween reach its target" checks.
+- [x] Live browser verification remains blocked by the same environment-
+      level constraint prior rounds documented; the replay technique
+      above is considered sufficient to trust this fix in the meantime.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
