@@ -290,6 +290,20 @@ class VisualizerBackend(LiquidHandlerBackend):
     event["tip_spots"] = [
       {"resource": spot.name, "resource_has_tip": False} for spot in pickup.resource.get_all_items()
     ]
+    # A representative tip's real length/capacity, so Core96Head's own 96
+    # tip cones can be sized/colored to match -- same fields
+    # channel_ops_event() reports for a single-channel pick_up_tips (see
+    # that function's own tip_length_mm/tip_max_volume_ul comment). Every
+    # tip in one rack is normally the same model, so any present one
+    # works as "the" tip, the same way a single-channel pickup only ever
+    # has the one it actually grabbed. `None` if the rack was already
+    # fully empty (shouldn't happen -- LiquidHandler.pick_up_tips96()
+    # itself validates before this is ever reached -- but doesn't crash
+    # either way if it somehow did).
+    representative_tip = next((tip for tip in pickup.tips if tip is not None), None)
+    if representative_tip is not None:
+      event["tip_length_mm"] = representative_tip.total_tip_length
+      event["tip_max_volume_ul"] = representative_tip.nominal_volume
     await self._server.broadcast(event)
 
   async def drop_tips96(self, drop: DropTipRack, **backend_kwargs) -> None:

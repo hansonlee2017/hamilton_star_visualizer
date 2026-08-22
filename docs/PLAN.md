@@ -2714,6 +2714,35 @@ too.
       visible hanging beneath the cyan block, matching a single channel's
       tip glyph exactly).
 
+      Second follow-up fix (same round, user-reported): "The tips appear
+      too short. Be sure to match the tips length as what was done with
+      the multichannel pipettes." Correct -- the cone grid above still
+      used the fixed `CHANNEL_TIP_HEIGHT` placeholder unconditionally,
+      never the real tip's own length the way `Channel.setTip()` rebuilds
+      its single tipMesh's geometry from `channel_ops_event()`'s
+      `tip_length_mm`. `visualizer_backend.py`'s `pick_up_tips96` gained
+      the same fields: a *representative* tip (the first non-`None` entry
+      in `pickup.tips` -- every tip in one rack is normally the same
+      model, so any present one works the same way a single-channel
+      pickup only ever has the one it actually grabbed) contributes
+      `tip_length_mm`/`tip_max_volume_ul` to the event. `Core96Head`'s 96
+      cones share one geometry and one material (not 96 independent
+      pairs), so `setTips(present, lengthMm, maxVolumeUl)` only ever needs
+      to rebuild/recolor that one shared pair -- geometry only rebuilt
+      (and all 96 meshes repositioned) when the length actually changes,
+      color follows `tipColorForVolume()` the same capacity-bucket way a
+      channel's own carried tip does, mirroring `Channel.setTip()`
+      exactly. Verified live against `core96_demo.py`'s real 300uL filter
+      tip (`total_tip_length` confirmed via direct PyLabRobot introspection
+      at 59.9mm, well past the 35.2mm placeholder): `core96Head.tipLength`/
+      `tipGeometry.parameters.height` both read `59.9` mid-sequence (were
+      `35.2` before any pickup), each tip mesh's own local `position.y`
+      correctly at `-29.95` (half the new length), and
+      `tipMaterial.color` correctly `0xffd54f` (yellow, the <=300uL
+      bucket) instead of the flat fallback amber -- confirmed visually too
+      (0.25x speed again) as a noticeably longer yellow cone grid reaching
+      further down toward the rack.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

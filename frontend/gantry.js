@@ -513,16 +513,20 @@ class Core96Head {
 
     // 96 tip cones, hanging below the block the same way a single
     // Channel's own tipMesh hangs below its body -- see this class's own
-    // CORE96_TIP_ROWS/COLS comment. Built once (not resized/recreated
-    // per pick-up, unlike Channel.setTip()'s real-tip-length geometry
-    // rebuild) -- there's no per-tip capacity data for a 96-head pick-up
-    // to react to yet (see setTips()'s own comment).
-    const tipGeometry = new THREE.ConeGeometry(CHANNEL_TIP_RADIUS, CHANNEL_TIP_HEIGHT, 4);
-    const tipMaterial = new THREE.MeshLambertMaterial({ color: TIP_PRESENT_COLOR_FALLBACK });
+    // CORE96_TIP_ROWS/COLS comment. All 96 share one geometry and one
+    // material (not 96 independent ones) -- every tip in one rack is
+    // normally the same model, so there's only ever one real length/color
+    // to represent at a time, and setTips() below rebuilds/recolors this
+    // one shared pair for all 96 at once, the same way Channel.setTip()
+    // rebuilds its own single tipMesh's geometry when the real tip's
+    // length differs from CHANNEL_TIP_HEIGHT's placeholder.
+    this.tipLength = CHANNEL_TIP_HEIGHT;
+    this.tipGeometry = new THREE.ConeGeometry(CHANNEL_TIP_RADIUS, CHANNEL_TIP_HEIGHT, 4);
+    this.tipMaterial = new THREE.MeshLambertMaterial({ color: TIP_PRESENT_COLOR_FALLBACK });
     this.tipMeshes = [];
     for (let row = 0; row < CORE96_TIP_ROWS; row++) {
       for (let col = 0; col < CORE96_TIP_COLS; col++) {
-        const tip = new THREE.Mesh(tipGeometry, tipMaterial);
+        const tip = new THREE.Mesh(this.tipGeometry, this.tipMaterial);
         const localX = (col - (CORE96_TIP_COLS - 1) / 2) * CHANNEL_PITCH_MM;
         const localZ = (row - (CORE96_TIP_ROWS - 1) / 2) * CHANNEL_PITCH_MM;
         tip.position.set(localX, -CHANNEL_TIP_HEIGHT / 2, localZ);
@@ -549,16 +553,29 @@ class Core96Head {
     this.group.position.copy(p);
   }
 
-  // Toggles all 96 tip cones' visibility at once -- no hue/capacity
-  // choice to make the way a single Channel's tipColorForVolume() has,
-  // since pick_up_tips96 doesn't currently thread a representative tip's
-  // own volume through (see visualizer_backend.py's pick_up_tips96 --
-  // would be a reasonable future addition, mirroring
-  // channel_ops_event()'s tip_max_volume_ul, not needed for a first
-  // version of this).
-  setTips(present) {
+  // `lengthMm`/`maxVolumeUl`: the real length and nameplate capacity of
+  // the representative tip visualizer_backend.py's pick_up_tips96 found
+  // on the rack (see that function's own comment) -- mirrors Channel.
+  // setTip() exactly: geometry only gets rebuilt (and every one of the 96
+  // meshes repositioned to the new length) when the length actually
+  // differs from what's currently built, and color follows
+  // tipColorForVolume() the same capacity-bucket way a single channel's
+  // carried tip does, not always the flat fallback amber.
+  setTips(present, lengthMm, maxVolumeUl) {
     this.hasTips = present;
     for (const tip of this.tipMeshes) tip.visible = present;
+    if (!present) return;
+    this.tipMaterial.color.setHex(tipColorForVolume(maxVolumeUl));
+    const length = lengthMm ?? CHANNEL_TIP_HEIGHT;
+    if (length !== this.tipLength) {
+      this.tipGeometry.dispose();
+      this.tipGeometry = new THREE.ConeGeometry(CHANNEL_TIP_RADIUS, length, 4);
+      for (const tip of this.tipMeshes) {
+        tip.geometry = this.tipGeometry;
+        tip.position.y = -length / 2;
+      }
+      this.tipLength = length;
+    }
   }
 
   enqueue(target, duration, onComplete) {
@@ -655,7 +672,7 @@ export function handleOpEvent(msg) {
     }
     case "pick_up_tips96":
       animateCore96Op(msg, () => {
-        core96Head.setTips(true);
+        core96Head.setTips(true, msg.tip_length_mm, msg.tip_max_volume_ul);
         // Every one of the rack's 96 spots empties at once -- see
         // visualizer_backend.py's pick_up_tips96 for why this needs no
         // tracker read, same reasoning channel_ops_event() uses for a
