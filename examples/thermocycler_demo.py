@@ -103,14 +103,30 @@ async def main() -> None:
   await server.wait_for_start()
   print("Started.")
 
+  # Unlike a LiquidHandler's channels (each with its own real-paced
+  # animation queue -- see cherry_pick_demo.py's docstring), the
+  # thermocycler's lid-slide/shimmer animations are plain fire-and-forget
+  # tweens with no queue behind them (deliberately -- see main.js's
+  # "Thermocycler: lid slide + cycling shimmer" section), so calling these
+  # back-to-back with no delay starts them all firing at once instead of
+  # playing out in sequence. Since run_protocol() completes instantly
+  # against the chatterbox backend (no real cycling time to wait on), the
+  # sleeps below are standing in for that queue by hand, matched to
+  # main.js's own THERMOCYCLER_LID_MS/THERMOCYCLER_SHIMMER_MS -- without
+  # them, open_lid()'s animation starts before the close/shimmer ones have
+  # visually finished, which reads as "the lid never opens" (user-reported:
+  # it *does* fire, just buried under/before the still-playing shimmer).
   print("Closing lid...")
   await tc.close_lid()
+  await asyncio.sleep(0.6)  # THERMOCYCLER_LID_MS
 
   print("Running protocol...")
   await tc.run_protocol(PCR_PROTOCOL, block_max_volume=25.0)
+  await asyncio.sleep(5.0)  # THERMOCYCLER_SHIMMER_MS
 
   print("Opening lid...")
   await tc.open_lid()
+  await asyncio.sleep(0.6)  # THERMOCYCLER_LID_MS -- let it finish before mark_finished()
 
   # Without this, VisualizerServer's "replay" guard (see server.py: replay
   # is only allowed before a run starts, or after it's finished) never
