@@ -162,7 +162,18 @@ HamiltonVisualizer/
 │       └── scene.py             # resource-tree -> scene graph serialization
 ├── frontend/
 │   ├── index.html
-│   ├── main.js
+│   ├── main.js            # thin orchestrator: viewport, websocket wiring, render loop
+│   ├── coordinates.js      # PyLabRobot <-> Three.js coordinate mapping
+│   ├── categories.js       # category/tip color palette + legend data
+│   ├── duration-scale.js   # HUD playback-speed multiplier
+│   ├── scene-builder.js    # scene graph -> Three.js object construction
+│   ├── resource-state.js   # live tip/volume/protocol-summary updates
+│   ├── thermocycler.js     # lid-slide + cycling-shimmer animation
+│   ├── gantry-planning.js  # pure motion-planning math (unit-tested, see tests/frontend/)
+│   ├── gantry.js           # the 8-channel arm model + "op" event dispatch
+│   ├── dom.js              # DOM handles, event log, HUD wiring
+│   ├── websocket.js        # the websocket connection itself
+│   ├── tooltip.js          # hover tooltips
 │   └── vendor/
 │       └── three.module.js
 ├── examples/

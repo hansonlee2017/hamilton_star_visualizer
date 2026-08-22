@@ -2297,6 +2297,100 @@ rather than guessed.
       `lidMesh.geometry.parameters` = `{width: 139.76, depth: 97.48}`,
       matching the plate's own 127.76:85.48 aspect ratio.
 
+      Two more follow-up fixes, both in the new `examples/thermocycler_demo.py`
+      (promoted from a throwaway scratchpad verification script into a real,
+      committed example so there's an actual command to run -- see that
+      file's own docstring): (1) Replay did nothing after the run finished --
+      `VisualizerServer`'s replay guard only opens once `mark_finished()` has
+      been called, which the script never did; added it. (2) The lid
+      genuinely wasn't opening "after thermal cycling is done" (user-
+      reported) -- not a positioning bug (a same-turn detour down that path
+      was reverted), but a pacing one: `close_lid()`/`run_protocol()`/
+      `open_lid()` all complete near-instantly against the chatterbox
+      backend with nothing between them, and unlike a `LiquidHandler`'s
+      channels (each with a real-paced animation queue), the thermocycler's
+      lid-slide/shimmer animations are plain fire-and-forget tweens with no
+      queue -- so `open_lid()`'s 600ms slide fired and finished before the
+      5-second shimmer had visually gotten anywhere. Added `asyncio.sleep()`
+      calls matched to `main.js`'s own timing constants, standing in by hand
+      for the queue liquid-handling ops get for free.
+
+## Review round 36
+
+User request: "maybe we should divide main.js up because now it is too
+long" (1879 lines), plus "perhaps we need some unit test for it as well?"
+mid-turn. Proposed a 9-module split and a `node --test`-based (zero
+dependency, no build step) testing approach via `AskUserQuestion` before
+starting -- both confirmed as proposed.
+
+- [x] **Split `frontend/main.js` into 9 focused modules**, each with a
+      clear one-directional dependency (no cycles): `coordinates.js`
+      (`mapPoint()`), `categories.js` (color palette + `tipColorForVolume()`
+      + legend data), `duration-scale.js` (the HUD's playback-speed
+      multiplier, split out just so gantry.js/thermocycler.js/dom.js don't
+      need to import each other for one shared number), `scene-builder.js`
+      (scene graph -> Three.js construction; owns `resourceIndex`/
+      `hoverables`), `resource-state.js` (live tip/volume/protocol-summary
+      updates), `thermocycler.js` (lid-slide + shimmer animation),
+      `gantry.js` (the `Channel` class + `handleOpEvent()`'s op dispatch),
+      `dom.js` (DOM handles, event log, HUD wiring), `websocket.js` (the
+      connection itself), `tooltip.js` (hover tooltips). `main.js` shrinks
+      to ~150 lines: Three.js viewport/camera setup, wiring
+      `websocket.js`'s `connect()` with callbacks from the other modules,
+      and the render loop.
+
+      The one real circularity risk -- dom.js's Start/Reset/Replay buttons
+      need to *send* on the websocket, while websocket.js's message
+      handlers need to update DOM/HUD state -- resolved by making
+      `websocket.js` fully callback-driven (`connect(handlers)`) and
+      DOM-agnostic, so `dom.js` can import its `send()` one-directionally
+      without websocket.js ever needing to import `dom.js` back.
+      `channels` (gantry.js) and `resourceIndex`/`hoverables`
+      (scene-builder.js) are re-exported as live ES-module bindings (not
+      snapshotted) -- unlike CommonJS `require()`, an ES `import` always
+      sees the exporting module's *current* value, so `ensureChannels()`
+      wholesale-reassigning `channels` is still visible everywhere that
+      imported it, exactly as it was when everything shared one scope.
+
+- [x] **Split `gantry.js`'s `resolveChannelYs()`/`planGantryPasses()`
+      further, into a new `gantry-planning.js`**, deliberately with zero
+      THREE.js/DOM imports -- these two are the least-obvious logic in the
+      whole frontend (a change-of-variable feasibility solver for "can
+      these channels' y targets all be reached in one gantry stop," plus
+      the per-x stop-grouping built on top of it) and have been the source
+      of real, previously-live-debugged desync bugs (rounds 15, 26, 34) --
+      exactly what a unit test is for. `gantry.js` now just calls
+      `planGantryPasses(entries, channels)` with its own live `Channel[]`.
+
+- [x] **Added `node --test`-based unit tests** (`tests/frontend/`, zero
+      dependencies, no build step -- matching this repo's existing
+      no-build-step convention): 17 tests across `gantry-planning.js`
+      (`resolveChannelYs`'s already-valid/nudge/sandwiched/throws cases;
+      `planGantryPasses`'s single-x, scattered-x, partial-targeting, and
+      same-x-conflict-fallback cases -- the last two checked via a
+      reconstructed-invariant helper, not hand-derived exact y values, so
+      they validate the actual physical constraint the function exists to
+      guarantee rather than one brittle worked example), `categories.js`
+      (`tipColorForVolume`'s threshold buckets/boundaries/fallback), and
+      `resource-state.js` (`volumeVisual`/`tipVisual`'s empty/full/
+      monotonic/sqrt-scaling behavior). `frontend/node_modules/three/
+      package.json` is a small shim (not a real npm install -- just points
+      the bare `"three"` specifier at the already-vendored
+      `frontend/vendor/three.module.js`) so `resource-state.js`'s existing
+      `import * as THREE from "three"` resolves identically under plain
+      Node and the browser's own importmap, with zero changes to any
+      import line; carved an exception into `.gitignore`'s blanket
+      `node_modules/` rule for just this one file.
+
+      Verified live (not just the new unit tests): re-ran
+      `examples/thermocycler_demo.py` (full close/run/open sequence +
+      Replay) and `examples/cherry_pick_demo.py` (the scattered-6-column
+      smiley-face dispense -- exercises `planGantryPasses`'s multi-pass
+      grouping directly) against the split frontend with a clean browser
+      console -- identical behavior to before the split, screenshots and
+      event log matched pre-split runs exactly. `docs/DESIGN.md`'s file
+      tree and `README.md`'s testing section updated to match.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

@@ -1,0 +1,4 @@
+{
+  "type": "module",
+  "comment": "Marks frontend/*.js and tests/frontend/*.js as ES modules for Node's resolver -- no dependencies, no build step, no npm install needed (see this directory's README.md). Node auto-detects ESM syntax in plain .js files on its own in recent versions, but this makes it explicit rather than relying on that heuristic."
+}

@@ -4,5 +4,12 @@ __pycache__/
 .uv/
 uv.lock.tmp
 node_modules/
+# Exception: not a real npm install -- a tiny package.json pointing "three"
+# at the already-vendored frontend/vendor/three.module.js, so `node --test`
+# can resolve frontend/*.js's existing `import ... from "three"` the same
+# way the browser's own importmap does. See that file's own comment.
+!frontend/node_modules/
+!frontend/node_modules/three/
+!frontend/node_modules/three/package.json
 .DS_Store
 *.log

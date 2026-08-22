@@ -127,9 +127,17 @@ objects, plus `.channels` for the gantry's own animation state) or
 `window.__lastStateMessages` (captured tip/volume state events) for
 debugging.
 
-Unit tests (currently just `src/hamilton_visualizer/normalization.py`'s
-pure decision logic -- no PyLabRobot/browser involved):
+Unit tests -- Python side (`src/hamilton_visualizer/normalization.py`'s
+pure decision logic, no PyLabRobot/browser involved):
 
 ```bash
 uv run pytest
+```
+
+Frontend side (`frontend/gantry-planning.js`'s motion-planning math and a
+couple of other pure-logic modules -- no browser, no build step, via
+Node's built-in test runner; see `tests/frontend/README.md`):
+
+```bash
+node --test ./tests/frontend/*.test.js
 ```
