@@ -890,14 +890,40 @@ class CarriedPlate {
   }
 }
 
-let carriedPlate = null;
+// resourceName -> CarriedPlate, one per resource this session has ever
+// picked up with the CoRe gripper -- *not* a single shared slot, even
+// though a real gripper only ever physically holds one resource at a
+// time. The demo scripts this feature supports routinely alternate which
+// resource is currently gripped *faster than each one's own visual
+// journey can finish playing* -- e.g. pcr_setup_demo.py's own "cap the
+// plate with its lid, then immediately pick the plate itself up and
+// carry it to the ODTC" -- and a single shared slot, replaced on every
+// pickup, orphaned whichever resource's own queue hadn't finished
+// draining yet the moment a *different* resource got picked up next:
+// nothing ever ticks it again (only the current slot's occupant gets
+// ticked), so its group froze wherever it happened to be, and the *next*
+// resource that reuses the same underlying variable seeds a fresh
+// MotionUnit from its own current msg.x/y/z -- which, being wherever
+// that resource *data-model-wise* already is by then (its own drop
+// having already run), is nowhere near where its group is still frozen
+// visually -- an instant snap the moment that fresh instance's first leg
+// ticks (user-reported: "the lid movement and the ODTC animations fire
+// right at the beginning instead of waiting for pipetting to finish" --
+// confirmed live: pcr_setup_demo.py's own lid visibly snapped straight to
+// its capped-on-the-plate-at-the-carrier position within the first dozen
+// frames of the whole run, well before the reagent fill -- or even the
+// lid's own cap move -- had actually finished animating). Keying by
+// resource name instead means each resource's own CarriedPlate keeps
+// existing (and keeps getting ticked, see updateCarriedPlate() below)
+// for as long as it takes to finish, entirely independent of whichever
+// *other* resource the gripper has since moved on to.
+const carriedPlates = new Map();
 // Ticked from main.js's render loop alongside every channel/core96Head --
 // see that file's own animate() loop. A plain exported function (not a
-// class main.js has to know about) since there's at most one at a time and
-// main.js otherwise has no reason to reach into this module's gripper
-// state.
+// class main.js has to know about) since main.js otherwise has no reason
+// to reach into this module's gripper state.
 export function updateCarriedPlate(dtMs) {
-  carriedPlate?.update(dtMs);
+  for (const cp of carriedPlates.values()) cp.update(dtMs);
 }
 
 // [backChannelIndex, frontChannelIndex] currently showing a pad glyph, or
@@ -1063,62 +1089,110 @@ function padTargets(backChannel, frontChannel, padY, padZ) {
 // currently-carried plate itself -- called alongside it (never alone) so
 // the plate visibly travels with the two channels gripping it, not just
 // teleporting to each new stop.
-function animateCarriedPlateTo(x, y, z, onArrive) {
-  if (!carriedPlate) return;
-  carriedPlate.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
-  carriedPlate.enqueue({ x, y: null, z: restZ }, scaled(X_MOVE_MS));
-  carriedPlate.enqueue({ x, y, z: restZ }, scaled(Y_MOVE_MS));
-  carriedPlate.enqueue({ x, y, z }, scaled(DESCEND_MS), onArrive);
+function animateCarriedPlateTo(resourceName, x, y, z, onArrive) {
+  const cp = carriedPlates.get(resourceName);
+  if (!cp) return;
+  cp.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
+  cp.enqueue({ x, y: null, z: restZ }, scaled(X_MOVE_MS));
+  cp.enqueue({ x, y, z: restZ }, scaled(Y_MOVE_MS));
+  cp.enqueue({ x, y, z }, scaled(DESCEND_MS), onArrive);
+}
+
+// Longest remaining real-world queued duration across the whole gantry
+// apparatus -- every channel, the 96-head, and whatever's currently
+// carried -- i.e. how long until *everything* currently animating has
+// genuinely finished, not just whichever one op happens to be looping
+// over here. Used to make some *other* animation (the thermocycler's own
+// lid-slide/shimmer, or a fresh CoRe-gripper pickup's own hold -- see
+// holdCarriedPlate()) wait for the rest of the scene to visually catch
+// up first, instead of starting the instant its own op event arrives --
+// which, per this whole project's "no realtime delay from a sleep-free
+// backend" design, is routinely while something else (e.g. a preceding
+// 8-channel reagent fill that happened to use the same two channels a
+// CoRe-gripper move defaults to) is still mid-animation. User-reported:
+// "The lid movement and the ODTC animations fire right at the beginning
+// instead of waiting for pipetting to finish" -- confirmed live: the
+// gripping channels' own queues already had the fill's own legs queued
+// ahead of a lid pickup's, so they correctly kept the *channels*
+// themselves from moving early, but nothing told the *lid itself* (a
+// freshly-created, previously-empty CarriedPlate queue) or the
+// *thermocycler's* own animQueue (likewise unrelated to any channel's
+// queue) to wait for that same backlog -- each one only knew about
+// whatever *it* had just been asked to do, not what else was still
+// in-flight elsewhere.
+function gantryRemainingMs() {
+  let max = 0;
+  for (const ch of channels) max = Math.max(max, ch.motion.remainingMs);
+  max = Math.max(max, core96Head.motion.remainingMs);
+  for (const cp of carriedPlates.values()) max = Math.max(max, cp.motion.remainingMs);
+  return max;
 }
 
 // Holds the carried plate exactly still (no target change on any axis --
 // MotionUnit's own "stay wherever this leg starts" null-target meaning,
-// see enqueue()'s docstring) for `stops` gripper stops' worth of real
-// time. Enqueued from core_pick_up_resource's own handler, matching
-// however many stops it *itself* just enqueued on the channels (1, or 2
-// when a pad-attach leg came first) -- without this, the plate's own
-// first *real* travel leg (enqueued later, from a core_move_picked_up_
-// resource/core_drop_resource event) started playing the instant that
-// later event's handler ran, which -- per this whole feature's own
-// established "the backend has no reason to wait between back-to-back
-// calls" timing -- is routinely *before* the channels have actually
-// finished approaching and descending onto the resource at all (user-
-// reported: "it is moving during the gripper picked up animation"). The
-// plate visibly started traveling before it had even been "grabbed."
-// Holding it here keeps its own timeline in lockstep with the channels'
-// real one, the same way animateGripperStop()'s own idle-channel dragging
-// keeps every *other* channel in lockstep with whichever two are active.
+// see enqueue()'s docstring) until the channels have genuinely finished
+// both (a) whatever was already queued on the gantry *before* this
+// pickup's own legs were added (`preexistingMs`, measured by the caller
+// via gantryRemainingMs() *before* calling animateGripperStop() -- see
+// that function's own docstring for why this needs measuring at all),
+// and (b) this pickup's own newly-added stop(s) (1, or 2 when a
+// pad-attach leg came first). Without (a), the plate's own first *real*
+// travel leg (enqueued later, from a core_move_picked_up_resource/
+// core_drop_resource event) started playing the instant that later
+// event's handler ran, regardless of how much unrelated animation
+// (reagent fill, an earlier move, anything) the gripping channels
+// themselves still had left to play through first. Without (b) -- this
+// function's own earlier form, before `preexistingMs` existed -- the
+// plate started moving before the channels had even *arrived* at it, a
+// narrower version of the same race (see "Review round 42").
 //
-// Enqueued as `stops` sets of 4 separate null-target legs (rise/x/y/
-// descend), not one combined `GRIPPER_STOP_MS * stops` task -- these are
-// mathematically the same total duration, but *not* the same real
-// wall-clock time once AnimationQueue's own per-frame ticking is
-// accounted for: `AnimationQueue.update()` discards whatever `dt`
-// overshoots a task's own duration on the exact frame it completes
-// (`elapsed` resets to 0 for the next task, not `elapsed - duration`), so
-// every task *completion* can round up to the next real animation frame
-// -- more completions means more chances to lose a few ms this way. The
-// channels drive each stop as 4 separate legs (animateGripperStop()); a
-// single combined hold task has only 1 completion boundary where the
-// channels' own 4-leg version has 4 (times `stops`), so the two
-// routinely finish at slightly different real times even though they
-// share the exact same nominal duration and the exact same per-frame
-// `dt` (user-reported: "they almost travel together and only slightly
-// desync" -- confirmed via a standalone simulation of AnimationQueue's
-// real update loop at 60fps: a 2-stop hold as one combined task finishes
-// a *consistent* ~66.67ms -- almost exactly 4 frames -- before the
-// channels' own 8-leg-boundary version of the same nominal 2200ms
-// duration actually does, regardless of frame-phase offset). Matching the
-// leg count/durations exactly, not just the total, keeps both queues
-// losing the identical amount of rounding on the identical frames.
-function holdCarriedPlate(stops) {
-  if (!carriedPlate) return;
-  for (let i = 0; i < stops; i++) {
-    carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(RISE_MS));
-    carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(X_MOVE_MS));
-    carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(Y_MOVE_MS));
-    carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(DESCEND_MS));
+// (a) and (b) are deliberately enqueued differently: (a) as a single
+// combined task (there's no structural relationship between whatever
+// produced that backlog and this carried resource's own timeline -- a
+// reagent fill's own leg boundaries, say -- so there's nothing to
+// frame-match against); (b) as `stops` sets of 4 separate null-target
+// legs (rise/x/y/descend), matching animateGripperStop()'s own per-leg
+// shape exactly -- these *are* structurally the same stop, and
+// AnimationQueue's own per-task completion rounding (see
+// remainingMs()'s own docstring) means a single combined task covering
+// the same nominal duration finishes a few ms *earlier*, in real frames,
+// than the channels' own multi-leg version of it does (confirmed via a
+// standalone simulation of AnimationQueue's real update loop at 60fps:
+// consistently ~66.67ms -- almost exactly 4 frames -- for a 2-stop hold,
+// regardless of frame-phase offset -- see "Review round 42").
+function holdCarriedPlate(resourceName, preexistingMs, stops) {
+  const cp = carriedPlates.get(resourceName);
+  if (!cp) return;
+  if (preexistingMs > 0) {
+    cp.enqueue({ x: null, y: null, z: null }, preexistingMs);
   }
+  for (let i = 0; i < stops; i++) {
+    cp.enqueue({ x: null, y: null, z: null }, scaled(RISE_MS));
+    cp.enqueue({ x: null, y: null, z: null }, scaled(X_MOVE_MS));
+    cp.enqueue({ x: null, y: null, z: null }, scaled(Y_MOVE_MS));
+    cp.enqueue({ x: null, y: null, z: null }, scaled(DESCEND_MS));
+  }
+}
+
+// Makes `entry`'s own animQueue (a thermocycler's lid-slide/shimmer --
+// see thermocycler.js's queueLidAnimation()/queueThermocyclerShimmer(),
+// the only callers) wait for the rest of the gantry to finish whatever
+// it's currently doing before its *next* enqueued task (the real
+// animation the caller is about to queue right after this) starts
+// playing -- see gantryRemainingMs()'s own docstring for the race this
+// closes. A single combined wait task, not leg-matched the way
+// holdCarriedPlate()'s own stop(s) are (see that function's own
+// docstring for why that distinction matters there): a thermocycler
+// animation was never structurally related to any channel's own leg
+// boundaries in the first place, so there's nothing to frame-match
+// against here, just a real quantity of time to sit out. Harmless to
+// call unconditionally, even when nothing's actually in flight elsewhere
+// (gantryRemainingMs() returning 0 -- the common case once the gantry's
+// caught up -- costs at most one extra render frame; see remainingMs()'s
+// own docstring for why AnimationQueue never divides by zero here).
+function waitForGantry(entry) {
+  const ms = gantryRemainingMs();
+  if (ms > 0) entry.animQueue.enqueue({ duration: ms, onTick: () => {} });
 }
 
 export function handleOpEvent(msg) {
@@ -1173,7 +1247,10 @@ export function handleOpEvent(msg) {
     case "thermocycler_open_lid":
     case "thermocycler_close_lid": {
       const entry = resourceIndex.get(msg.resource);
-      if (entry) queueLidAnimation(entry, msg.op === "thermocycler_open_lid");
+      if (entry) {
+        waitForGantry(entry);
+        queueLidAnimation(entry, msg.op === "thermocycler_open_lid");
+      }
       logEvent(msg.op, msg.resource ?? "");
       break;
     }
@@ -1181,6 +1258,7 @@ export function handleOpEvent(msg) {
       const entry = resourceIndex.get(msg.resource);
       if (entry) {
         entry.protocolSummary = msg.protocol_summary;
+        waitForGantry(entry);
         queueThermocyclerShimmer(entry);
       }
       logEvent(msg.op, `${msg.resource}: ${msg.protocol_summary ?? ""}`);
@@ -1245,49 +1323,48 @@ export function handleOpEvent(msg) {
       // animation actually finishes (the backend has no reason to wait
       // between them -- see e.g. core_gripper_demo.py's own back-to-back
       // move_plate() calls), and that next event's own
-      // animateCarriedPlateTo() call needs `carriedPlate` to already exist
-      // to enqueue onto (confirmed live: deferring this to onArrive left
-      // `carriedPlate` still null when the very next op's handler ran,
-      // silently dropping its motion legs -- the resource visibly never
-      // moved). Reparenting this early causes no visible jump either way:
-      // `.attach()` preserves world position exactly, and nothing enqueues
-      // any motion onto the new CarriedPlate until a *later* op actually
-      // calls animateCarriedPlateTo(), so it just keeps rendering at this
-      // same point throughout the channels' own approach, identical to how
-      // it looked before being reparented.
+      // animateCarriedPlateTo() call needs this resource's own entry in
+      // `carriedPlates` to already exist to enqueue onto (confirmed live:
+      // deferring this to onArrive left it missing when the very next
+      // op's handler ran, silently dropping its motion legs -- the
+      // resource visibly never moved). Reparenting this early causes no
+      // visible jump either way: `.attach()` preserves world position
+      // exactly, and nothing enqueues any motion onto a freshly-created
+      // CarriedPlate until a *later* op actually calls
+      // animateCarriedPlateTo(), so it just keeps rendering at this same
+      // point throughout the channels' own approach, identical to how it
+      // looked before being reparented.
       const entry = resourceIndex.get(msg.resource);
       if (entry) {
         gantryGroup.attach(entry.group);
-        // Reuses the *existing* CarriedPlate when this pickup is for the
-        // same resource one was already wrapping -- which, in practice,
-        // is every pickup: a real gripper can only ever hold one resource
-        // at a time, so a *different* `msg.resource` here would mean the
-        // previous one's own drop already ran (see that case's own
-        // comment on why it never nulls `carriedPlate` out). Replacing it
-        // unconditionally used to discard whatever motion legs the
-        // *previous* drop had just enqueued but hadn't finished playing
-        // out yet -- routine, since this pickup's own event typically
-        // arrives well before that ~1.1s animation completes (the same
-        // "no reason for the backend to wait" timing this whole case's
-        // own comment already describes) -- and re-seed a brand new
-        // MotionUnit straight from this pickup's own msg.x/y/z. Since
-        // that's the resource's real *final* destination (correct), but
-        // the group was still visually rendering wherever the interrupted
-        // old MotionUnit had frozen mid-tween (also correct, in isolation
-        // -- reparenting alone never jumps), the *next* leg's very first
-        // tick recomputed the group's position from the new MotionUnit's
-        // fresh (and different) starting point -- an instant, visible
-        // snap to the destination with no travel animation at all
-        // (user-reported: "the plate appears to just move by itself...
-        // teleport to TC"). Reusing the same instance instead means its
-        // queue just keeps draining (and gets more legs appended, same as
-        // any Channel's own queue across back-to-back ops) with no
-        // discontinuity, regardless of how quickly pickups and drops
-        // alternate.
-        if (!carriedPlate || carriedPlate.resourceName !== msg.resource) {
-          carriedPlate = new CarriedPlate(msg.resource, { x: msg.x, y: msg.y, z: msg.z });
+        // Reuses this resource's own existing CarriedPlate if this isn't
+        // its first pickup this session -- see carriedPlates' own
+        // docstring for why every resource gets its *own* persistent
+        // entry (keyed by name) rather than one shared slot: a single
+        // shared slot, replaced on every pickup regardless of *which*
+        // resource, discarded whatever motion legs a *different*
+        // resource's own drop had just enqueued but hadn't finished
+        // playing yet -- routine whenever the gripper moves on to a
+        // second resource before the first one's own journey has had
+        // time to visually finish (the same "no reason for the backend
+        // to wait" timing this whole case's own comment already
+        // describes) -- and re-seeding a *fresh* MotionUnit for that
+        // *first* resource, straight from its own already-stale
+        // msg.x/y/z, the instant something eventually ticked it again
+        // (a later, unrelated pickup for it) caused exactly the same
+        // instant, visible snap "Review round 42"'s own teleport fix
+        // already solved for the *same*-resource case.
+        if (!carriedPlates.has(msg.resource)) {
+          carriedPlates.set(msg.resource, new CarriedPlate(msg.resource, { x: msg.x, y: msg.y, z: msg.z }));
         }
       }
+      // Measured *before* this pickup's own legs are enqueued below --
+      // see gantryRemainingMs()'s and holdCarriedPlate()'s own docstrings
+      // for why the plate needs to know about this at all (a preceding,
+      // entirely unrelated op -- e.g. a reagent fill that happened to use
+      // the same two channels a CoRe-gripper pickup defaults to -- could
+      // have left plenty of its own animation still queued on them).
+      const preexistingMs = gantryRemainingMs();
       // Pads aren't already on these channels -- a real prior leg (see
       // STAR_backend.py's own `if self.core_parked: await self.
       // pick_up_core_gripper_tools(...)`): travel to core_grippers first,
@@ -1319,7 +1396,7 @@ export function handleOpEvent(msg) {
       // event enqueues would start playing immediately when that event's
       // handler runs, not once the channels actually finish this pickup's
       // own approach -- see holdCarriedPlate()'s own comment.
-      holdCarriedPlate(stopsBeforeGrip + 1);
+      holdCarriedPlate(msg.resource, preexistingMs, stopsBeforeGrip + 1);
       logEvent("core_pick_up_resource", msg.resource ?? "");
       break;
     }
@@ -1327,7 +1404,7 @@ export function handleOpEvent(msg) {
       const { back_channel: back, front_channel: front } = msg;
       const grip = gripResourceTargets(back, front, msg.y, msg.z);
       animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
-      animateCarriedPlateTo(msg.x, msg.y, msg.z);
+      animateCarriedPlateTo(msg.resource, msg.x, msg.y, msg.z);
       logEvent("core_move_picked_up_resource", msg.resource ?? "");
       break;
     }
@@ -1335,16 +1412,16 @@ export function handleOpEvent(msg) {
       const { back_channel: back, front_channel: front, return_core_gripper, pad_x, pad_y, pad_z } = msg;
       const grip = gripResourceTargets(back, front, msg.y, msg.z);
       animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
-      // Enqueued while `carriedPlate` still refers to *this* resource --
-      // must run before the reparent/null-out below.
-      animateCarriedPlateTo(msg.x, msg.y, msg.z);
+      // Enqueued while this resource's own CarriedPlate entry still
+      // exists in `carriedPlates` -- must run before the reparent below.
+      animateCarriedPlateTo(msg.resource, msg.x, msg.y, msg.z);
       // Reparented back under the plain scene root synchronously here, not
       // deferred to an onArrive -- same "the very next op can arrive and
       // run its own handler well before this one's ~1.1s descend animation
       // actually finishes" race core_pick_up_resource's own comment
       // describes (confirmed live: a deferred version here stomped on a
       // *second* pickup that had already started by the time this drop's
-      // onArrive eventually fired, wiping out its carriedPlate mid-flight).
+      // onArrive eventually fired, wiping out its CarriedPlate mid-flight).
       // Reparenting early causes no visual jump: CarriedPlate.
       // applyPosition() always sets an absolute deck position regardless
       // of which (transform-less) parent the group currently sits under,
@@ -1360,22 +1437,22 @@ export function handleOpEvent(msg) {
       // mapPoint()). Per user direction ("reparent the real plate mesh").
       const entry = resourceIndex.get(msg.resource);
       if (entry && sceneRoot) sceneRoot.attach(entry.group);
-      // Deliberately *not* `carriedPlate = null` here: the legs just
-      // enqueued above haven't played out yet (they take their own ~1.1s
-      // of real ticking, via updateCarriedPlate() -- see that function's
-      // own comment), and nulling the module-level reference synchronously
-      // would orphan them, mid-queue, from the only thing that ever calls
-      // `.update()` on them -- confirmed live: the resource visibly never
-      // reached its drop destination, frozen at wherever it was when this
-      // handler ran, exactly the "silently dropped legs" bug the pickup
-      // side's own comment above describes, just for the opposite reason
-      // (too eager to clear the reference, instead of too slow to create
-      // it). Safe to just leave it referenced: once its queue drains, an
-      // idle AnimationQueue.update() is a no-op (see that class's own
-      // early-return), and the next core_pick_up_resource for this or any
-      // other resource unconditionally overwrites `carriedPlate` with a
-      // fresh instance anyway -- nothing ever reads a stale one as if it
-      // were still actively gripped.
+      // Deliberately *not* removed from `carriedPlates` here: the legs
+      // just enqueued above haven't played out yet (they take their own
+      // ~1.1s of real ticking, via updateCarriedPlate() -- see that
+      // function's own comment), and deleting this resource's own entry
+      // synchronously would orphan them mid-queue, from the only thing
+      // that ever calls `.update()` on them -- confirmed live: the
+      // resource visibly never reached its drop destination, frozen at
+      // wherever it was when this handler ran, exactly the "silently
+      // dropped legs" bug the pickup side's own comment above describes,
+      // just for the opposite reason (too eager to clear the entry,
+      // instead of too slow to create it). Safe to just leave it: once
+      // its queue drains, an idle AnimationQueue.update() is a no-op (see
+      // that class's own early-return), and a later core_pick_up_resource
+      // for this same resource reuses it (see that case's own comment) --
+      // nothing ever reads a stale, fully-drained entry as if it were
+      // still actively gripped.
       if (return_core_gripper) {
         // Trailing, channels-only stop (the plate has already been
         // released above -- animateCarriedPlateTo() isn't called again):

@@ -3446,6 +3446,112 @@ thermal-cycling protocol, (5) open the door and unload the capped plate,
       (`[]`) only once the very last (`return_core_gripper=True`) move
       actually finished -- not before.
 
+## Review round 44
+
+User feedback after watching `pcr_setup_demo.py`: "The lid movement and
+the ODTC animations fire right at the beginning instead of waiting for
+pipetting to finish." Three layered issues, found in order:
+
+- [x] **(1) A fresh CoRe-gripper pickup, and the thermocycler's own lid-
+      slide/shimmer, both started the instant their own op event arrived,
+      ignoring however much backlog was still queued elsewhere** (e.g. the
+      8-channel reagent-fill backlog left sitting on channels 6/7, the same
+      channels a CoRe-gripper pickup defaults to). New `gantryRemainingMs()`
+      helper in `gantry.js` (`Math.max` across every channel's, the 96-
+      head's, and every carried resource's own `motion.remainingMs`) lets
+      one animation system find out how busy the rest of the gantry still
+      is without reaching into its private state. `core_pick_up_resource`
+      now measures this (`preexistingMs`, captured *before* its own
+      `animateGripperStop()` calls) and folds it into `holdCarriedPlate()`
+      as one leading hold leg; a new `waitForGantry(entry)` helper does the
+      same for the thermocycler's own `animQueue` (`queueLidAnimation()`/
+      `queueThermocyclerShimmer()` in `thermocycler.js`), called right
+      before each real lid/shimmer task is queued.
+- [x] **Found and fixed a bug in this same helper's own foundation**:
+      `AnimationQueue.remainingMs` only sums a still-queued task's duration
+      when it's a plain number (a function-valued one can't be resolved
+      early without running its closure before its own `onStart`) -- but
+      `MotionUnit.enqueue()` unconditionally wrapped *every* duration in a
+      closure, even an already-known plain number, silently making every
+      not-yet-started leg invisible to it. Every leg gantry.js itself
+      enqueues only ever passes plain numbers, so this made
+      `gantryRemainingMs()` undercount to near-zero regardless of the real
+      backlog. Fixed in `motion-unit.js`: only wrap when `duration` is
+      actually a function. Confirmed via an isolated repro (72 legs
+      enqueued directly on a channel's own `motion`, `remainingMs` matched
+      the expected total exactly) and via `AnimationQueue`'s and
+      `MotionUnit`'s own unit tests, still 30/30 green.
+- [x] **(2) The real root cause, found only after (1) alone still didn't
+      fix it live**: `carriedPlate` was a single module-level slot, not one
+      per resource. `pcr_setup_demo.py`'s own sequence alternates the CoRe
+      gripper between two *different* resources six times (lid, plate,
+      lid, plate, lid, lid -- see "Review round 43"'s own "redundant
+      re-seat" pattern) -- each `core_pick_up_resource` for a resource
+      other than whichever one `carriedPlate` currently held replaced it
+      outright, silently orphaning the previous resource's own still-
+      queued hold/travel legs (nothing ever calls `.update()` on a
+      reference that's been overwritten). The orphaned resource's THREE
+      group froze wherever it was at that instant; much later, when that
+      same resource was picked up *again* (its own final move), a *fresh*
+      `CarriedPlate` seeded from that pickup's own real coordinates
+      replaced it -- correct data-model-wise, but different from wherever
+      the group had been frozen, so it snapped the moment that fresh
+      instance's first leg ticked. Confirmed via debug logging that (1)'s
+      own `preexistingMs`/`holdCarriedPlate` computed and enqueued
+      correctly (e.g. `preexistingMs=41600ms` for the demo's first lid
+      pickup, matching the full fill backlog) -- ruling out (1) itself and
+      pointing at this lifecycle bug instead.
+- [x] **Fixed by turning `carriedPlate` (singular) into `carriedPlates`, a
+      `Map<resourceName, CarriedPlate>`**, so each resource's own journey
+      keeps draining independently of whichever resource the gripper
+      subsequently picks up. `updateCarriedPlate()` now ticks every entry
+      in the map every frame; `animateCarriedPlateTo()` and
+      `holdCarriedPlate()` both take the resource name and look up (or, on
+      first pickup, create) that resource's own entry;
+      `core_drop_resource` deliberately leaves a fully-drained entry in
+      the map rather than deleting it (an idle `AnimationQueue.update()` is
+      already a no-op, and a later pickup of that same resource reuses the
+      existing entry) -- the exact same "don't be too eager to clear a
+      reference whose queue hasn't drained yet" reasoning `core_pick_up_
+      resource`'s own comment already documented for the pre-existing
+      single-resource case, just now applying it per-map-entry instead of
+      to one shared variable.
+- [x] Verified with two deterministic Node tests (no browser -- same
+      "stub `document`/`THREE` canvas context, hand-built fake scene fed
+      through the real `scene-builder.js`, manual `tickFrames()` loop"
+      approach prior rounds established): (1) the pre-existing single-
+      resource backlog test, re-run unchanged against the `carriedPlates`
+      refactor -- still passes (a lid stays put through ~18.7s of a 19.2s
+      queued fill backlog on every channel, then reaches its real drop
+      destination). (2) A new multi-resource alternation test, built to
+      directly reproduce `pcr_setup_demo.py`'s own lid/plate/lid pattern:
+      queues a fill-sized backlog, picks up and drops the lid, ticks only
+      partway through its own backlog, then -- while the lid's legs are
+      still queued and undrained -- picks up and drops a *different*
+      resource (the plate). Confirms the lid is not yet at its destination
+      at the interruption point, that it still eventually reaches its own
+      correct destination afterwards (impossible under the old shared-slot
+      bug, which would have left it frozen forever at the interruption
+      point), that the plate independently reaches its own correct
+      destination too, and that re-picking-up the lid still later (mirroring
+      the demo's final uncap step) resumes smoothly from its real settled
+      position with no snap. All checks pass.
+- [x] Live browser re-verification of the full `pcr_setup_demo.py` run
+      (confirming the lid visually waits for the fill to finish, not just
+      that the underlying math works) was attempted using this project's
+      own established in-page `requestAnimationFrame`-polling technique,
+      but blocked this session by an environment-level constraint: the
+      Browser pane reported "not displayed, so the page is not compositing
+      frames" for the whole session, which also freezes this app's own
+      `requestAnimationFrame`-driven render/update loop (not just
+      screenshot compositing) -- there's currently no way to advance this
+      app's animation state without a displayed, composited pane. Left as
+      a follow-up live check next session; the deterministic coverage
+      above is considered sufficient to trust the fix in the meantime,
+      consistent with this project's own prior experience of live-browser
+      timing measurements being *less* reliable than a deterministic Node
+      test, never more.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

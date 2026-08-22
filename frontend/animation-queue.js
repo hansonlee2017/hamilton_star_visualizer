@@ -49,6 +49,35 @@ export class AnimationQueue {
     return !this._current && this._queue.length === 0;
   }
 
+  // Total remaining real-world duration (ms) across the currently-running
+  // task (if any) plus everything still queued behind it -- lets a
+  // caller *outside* this queue's own owner find out how long it'll stay
+  // busy without reaching into private state itself (see gantry.js's own
+  // gantryRemainingMs(), used to make an unrelated animation -- the
+  // thermocycler's lid-slide/shimmer, or a fresh CoRe-gripper pickup's
+  // own hold -- wait for the rest of the scene to visually catch up
+  // first, instead of starting the instant its own op event arrives).
+  // Assumes every task's own `duration` is (or, for the currently-
+  // running one, already resolved to -- see update()'s own function-
+  // duration handling) a plain number; a still-queued task with a
+  // function-valued duration (this queue supports those -- see
+  // enqueue()'s own docstring -- thermocycler.js's lid-slide/shimmer
+  // tasks use them) contributes 0 here rather than being called early,
+  // which would run it before its own onStart. No caller in this
+  // codebase currently reads remainingMs on a queue that also has
+  // function-valued tasks queued (only ticked, never introspected this
+  // way), so this is a documented limitation, not an active bug.
+  get remainingMs() {
+    let total = 0;
+    if (this._current) {
+      total += Math.max(0, this._current.duration - this._current.elapsed);
+    }
+    for (const task of this._queue) {
+      total += typeof task.duration === "number" ? task.duration : 0;
+    }
+    return total;
+  }
+
   update(dtMs) {
     if (!this._current) {
       this._current = this._queue.shift();

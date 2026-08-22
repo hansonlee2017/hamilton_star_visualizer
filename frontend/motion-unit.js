@@ -58,7 +58,25 @@ export class MotionUnit {
           resolvedTarget.z = resolvedTarget.z(from);
         }
       },
-      duration: () => (typeof duration === "function" ? duration(from, resolvedTarget) : duration),
+      // Only actually wrapped in a function when `duration` itself is one
+      // (needs `from`/`resolvedTarget`, not available until onStart runs
+      // above) -- a plain number passed straight through unwrapped, not
+      // wrapped-and-later-resolved-back-into-the-same-number. Every call
+      // site in this codebase only ever passes plain numbers (see this
+      // file's own module docstring), so this is mostly about keeping
+      // `AnimationQueue.remainingMs` able to see a *queued, not-yet-
+      // started* task's own duration: that getter only sums plain-number
+      // durations (a still-queued function-valued one can't be resolved
+      // early without running its closure before its own onStart) --
+      // unconditionally wrapping every duration in one, even an already-
+      // known number, made *every* not-yet-started leg invisible to it,
+      // undercounting a queue's own real remaining backlog (confirmed
+      // live: gantry.js's own gantryRemainingMs()-based fixes -- syncing
+      // a CoRe-gripper pickup's hold and the thermocycler's own
+      // animations to the rest of the gantry's real backlog -- silently
+      // measured near-zero regardless of how much was actually still
+      // queued, until this was fixed).
+      duration: typeof duration === "function" ? () => duration(from, resolvedTarget) : duration,
       onTick: (t) => {
         const eased = easeInOutQuad(t);
         this.pos = {
@@ -78,5 +96,11 @@ export class MotionUnit {
 
   update(dtMs) {
     this._queue.update(dtMs);
+  }
+
+  // Delegates to the composed AnimationQueue -- see its own remainingMs
+  // docstring.
+  get remainingMs() {
+    return this._queue.remainingMs;
   }
 }
