@@ -2902,11 +2902,179 @@ time) -- implemented now that `Core96Head` exists.
       mid-sequence too. 30/30 frontend tests and 24/24 Python tests
       unaffected.
 
+## Review round 41
+
+User-requested new feature: "Using core-gripper to move plates from
+different sites on the carrier or to and from the inheco ODTC." Two of the
+8 pipetting channels grab a pair of gripper pads and use them to clamp and
+carry a plate -- render the pads as small rectangular blocks attached to
+those channels "just like tips," and show the plate itself actually moving.
+Scoped via `AskUserQuestion` up front: **require an explicit
+`use_arm="core"`** (the iSWAP arm stays the existing log-only/unanimated
+path), **model persistent pad attachment** (pads stay clamped onto the same
+two channels across moves, matching real hardware, rather than re-attaching
+every single pickup), **reparent the real plate mesh** (not a separate
+carried-plate glyph), and **read which channels from the call** (`channel_1`/
+`channel_2`/`core_front_channel`, mirroring `STARBackend`'s own API) rather
+than hardcoding a pair.
+
+- [x] **Real mechanics confirmed via source read**: `STARBackend.
+      pick_up_resource`/`drop_resource`/`move_picked_up_resource` all
+      default to `use_arm="iswap"`; `use_arm="core"` routes to
+      `core_pick_up_resource()`/`core_release_picked_up_resource()`, which
+      resolve `front_channel`/`back_channel = front_channel - 1` (default
+      `core_front_channel=7`, i.e. channels 6/7; the deprecated
+      `channel_1`/`channel_2` pair resolves to the same thing:
+      `front_channel = channel_2 - 1`, asserting `channel_1 + 1 ==
+      channel_2`), and gate a "channels attach to the pads first" step on
+      `self.core_parked` (`if self.core_parked: await
+      self.pick_up_core_gripper_tools(front_channel=front_channel)`) --
+      exactly the persistent-attachment behavior the user asked to model.
+      `drop_resource`'s own `return_core_gripper: bool = True` controls
+      whether that attachment is undone afterward.
+- [x] **Two real staleness bugs found and fixed in `events.py`**: every
+      existing single-resource event (`resource_event()`/`resource_point()`)
+      reads the resource's own *current* `get_absolute_location()` --
+      correct for pickup (nothing has moved it yet), but wrong for
+      `drop_resource`/`move_picked_up_resource`: `LiquidHandler` only
+      reassigns a resource to its real new parent *after* awaiting the
+      backend call these events are raised from, so at broadcast time the
+      resource is still parented at its *old* location. Fixed with two new
+      helpers, `resource_drop_point(drop)`/`resource_move_point(move)`,
+      built on a shared `_relocated_point()`: both use the already-resolved
+      absolute `Coordinate` PyLabRobot hands the backend directly
+      (`drop.destination`, confirmed the raw resolved value of whatever
+      `to=` was passed; `move.location`, confirmed the raw `to=` argument
+      of `move_picked_up_resource()` itself) instead of a live lookup.
+      Verified standalone: dropping a plate onto a `Coordinate(200, 150,
+      50)` destination reported `x=263.88` (`= 200 + size_x/2`), not the
+      plate's still-old `x=347.88` -- and the same live check for a
+      `move_picked_up_resource` leg.
+- [x] **Chatterbox kwarg-forwarding gap, patched rather than special-cased**
+      (per user direction: "Consider monkey patch the pylabrobot chatterbox
+      to forward the extra kwargs"): `LiquidHandlerChatterboxBackend.
+      pick_up_resource`/`move_picked_up_resource`/`drop_resource` take only
+      their bare dataclass argument -- no `**backend_kwargs` at all, unlike
+      every other chatterbox method (`pick_up_tips`/`aspirate`/`dispense`/
+      etc. all accept it). `_patch_chatterbox_resource_kwargs()` in
+      `visualizer_backend.py` monkey-patches those three methods once, at
+      import time, to accept and print `**backend_kwargs` like their
+      siblings -- letting `VisualizerBackend`'s own three methods use the
+      exact same established blind-forward-and-peek pattern
+      `pick_up_tips`/`aspirate`/`dispense` already use, instead of a
+      one-off "silently drop these specific kwargs" branch.
+- [x] **`VisualizerBackend` event design**: `pick_up_resource`/
+      `move_picked_up_resource`/`drop_resource` all peek `use_arm` out of
+      `backend_kwargs` (default `"iswap"`); anything but `"core"` keeps the
+      original plain `resource_event()` broadcast, unchanged. A `"core"`
+      pickup resolves `back_channel`/`front_channel` (mirroring
+      `STARBackend`'s own resolution above), computes `needs_attach =
+      (back_channel, front_channel) != self._core_gripper_channels` (new
+      `__init__` state, mirroring `STARBackend`'s own `core_parked`
+      tracking) and updates that state, then broadcasts
+      `core_pick_up_resource` with `back_channel`/`front_channel`/
+      `needs_attach`. A `"core"` drop broadcasts `core_drop_resource` via
+      `resource_drop_point()` (not `resource_event()`) with the same two
+      channel fields plus `return_core_gripper`, and only resets
+      `_core_gripper_channels` to `None` when that's true. A `"core"` move
+      broadcasts `core_move_picked_up_resource` via `resource_move_point()`.
+      Verified standalone (`VisualizerBackend` against a fake server, no
+      websocket): a full pickup → move → drop → repeat-pickup-different-
+      channels → deprecated-`channel_1`/`channel_2` → default-`use_arm`
+      sequence, asserting every field and the `_core_gripper_channels`
+      state transition at each step -- all passed.
+- [x] **Frontend: pad glyphs attached to channels, "just like tips"**:
+      `Channel` gained a `padMesh` (a small `BoxGeometry`, hidden by
+      default) and `setPad(visible)`, hanging below the body at the same
+      spot `tipMesh` does (a channel only ever carries one or the other in
+      real use). `setGripperPadChannels(back, front)` toggles exactly two
+      channels' pads at once, called from `"core_pick_up_resource"` only
+      when `needs_attach` is true, and from `"core_drop_resource"` (clearing
+      both) only when `return_core_gripper` is true -- otherwise pads stay
+      exactly where they were, modeling the persistent attachment the user
+      asked for. New `CORE_GRIPPER_PAD_COLOR` (`categories.js`) plus a
+      legend entry.
+- [x] **Frontend: the carried plate is the real mesh, reparented**: a new
+      `CarriedPlate` class wraps a `MotionUnit` whose `pos` is the
+      resource's own top-center point (the same "meaning" every op's
+      `msg.x/y/z` already has), converting to the group's left-front-bottom
+      local frame on every tick (the mirror image of `events.py`'s
+      `_relocated_point()`) so `animateCarriedPlateTo()`'s callers never
+      have to do that conversion themselves. `"core_pick_up_resource"`
+      reparents the resource's real scene-graph group into `gantryGroup`
+      via `Object3D.attach()` (world-transform-preserving -- no jump) and
+      wraps it in a fresh `CarriedPlate`; `"core_drop_resource"` reparents
+      it back under a new `sceneRoot` (set once via `setSceneRoot()`, since
+      `gantry.js` otherwise never touches it) at its real absolute
+      destination -- not into whatever THREE group actually corresponds to
+      its new PyLabRobot parent, since this project's scene tree only ever
+      gets rebuilt wholesale from a fresh "scene" message anyway, and a flat
+      `sceneRoot` child renders identically (position is already absolute
+      deck mm).
+- [x] **Two live-verified frontend timing bugs, both races between "when a
+      websocket op message is handled" (near-instant; the backend has no
+      reason to sleep between a move's own pickup/drop calls) and "when the
+      ~1.1s leg animation for that op actually finishes" (deferred, via an
+      `onArrive` callback)**:
+      1. Deferring the reparent + `CarriedPlate` *creation* to the pickup's
+         own `onArrive` left `carriedPlate` still `null` when the very next
+         op's handler ran (routinely well before that 1.1s elapsed) --
+         its `animateCarriedPlateTo()` call silently found nothing to
+         enqueue onto. Fixed by doing the reparent/creation synchronously,
+         in the event handler itself, not deferred at all -- safe, since
+         nothing enqueues motion onto it until a *later* op actually calls
+         `animateCarriedPlateTo()`, so it keeps rendering at the exact same
+         (world-transform-preserved) point in the meantime.
+      2. The mirror-image bug, introduced while fixing the first: setting
+         `carriedPlate = null` synchronously in the drop handler (to mirror
+         the fix above) orphaned that same drop's own just-enqueued legs
+         from the only thing that ever ticks them (`updateCarriedPlate()`
+         reads the current module-level `carriedPlate`) -- the resource
+         visibly never reached its destination, frozen wherever it was when
+         the handler ran. Fixed by simply not nulling it: an idle
+         `AnimationQueue` is already a no-op once drained, and the next
+         pickup (for this or any other resource) unconditionally overwrites
+         the reference anyway.
+
+      Both caught by a deterministic Node test (no browser, stubbed
+      `document`/`THREE` canvas context, a hand-built fake scene fed
+      through the real `scene-builder.js`) firing a pickup → drop → pickup
+      → drop burst with *zero* real time between calls -- worse than any
+      real backend spacing, and immune to the live browser's own
+      unpredictable requestAnimationFrame/`setInterval` throttling on a
+      backgrounded automation tab, which made this race nearly impossible
+      to catch by screenshot timing alone (screenshots taken between tool
+      calls kept landing on the *fully settled* final state regardless of
+      when the bug was present, since a whole 3-move sequence can complete
+      client-side well under 50ms once state changes stopped being
+      artificially paced by the old 1.1s-deferred `onArrive`). Not kept as
+      a committed test file, per `tests/frontend/README.md`'s own stated
+      scope ("no THREE.js rendering, no DOM" -- everything at that level is
+      "covered by hand" instead, matching every other rendering-heavy
+      change in this file); this write-up is that hand-coverage record.
+- [x] **New demo**: `examples/core_gripper_demo.py` moves a plate between
+      two carrier sites and onto/off the Inheco ODTC, all via
+      `lh.move_plate(..., use_arm="core")` -- PyLabRobot's own real API,
+      no visualizer-specific call needed. The first two moves pass
+      `return_core_gripper=False` so the pads stay attached across all
+      three (exercising `needs_attach=False` on the second/third pickups);
+      the last leaves PyLabRobot's own default (`True`), the one that makes
+      the pad glyphs disappear again. Verified live end-to-end multiple
+      times: final resting position (`world x/y/z` read via
+      `matrixWorld.elements`) matched the real PyLabRobot LFB coordinate
+      for the destination carrier site exactly on every run
+      (`(284.000, 071.500, 183.120)`, `mapPoint`-converted), the resource's
+      THREE parent correctly ended at the flat `sceneRoot` (not left under
+      `gantryGroup`), and both pad glyphs correctly disappeared only after
+      the final `return_core_gripper=True` drop.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
       scrubbing/seek UI — in-memory replay from Phase 4 covers the common
       "I missed it" / "watch that again" case within one run
-- [ ] iSWAP / CO-RE gripper + plate-move animation
+- [ ] iSWAP arm animation (still log-only/unanimated by design -- see
+      "Review round 41"; only the CO-RE gripper (`use_arm="core"`) is
+      animated)
 - [ ] Hamilton Vantage support
 - [ ] Firmware-accurate motion timing

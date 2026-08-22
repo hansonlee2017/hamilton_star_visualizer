@@ -93,6 +93,12 @@ const TIP_COLOR_BY_VOLUME = [
 // no per-item tip capacity to bucket by, the same "unknown" case this
 // covers for a single channel/tip_spot).
 export const TIP_PRESENT_COLOR_FALLBACK = 0xe0b23d;
+// A CoRe gripper pad glyph's color -- distinct from every other glyph here
+// (tip amber, 96-head teal-blue, gantry channel body grey) so "this channel
+// is holding a gripper pad, not a tip" reads at a glance. See gantry.js's
+// Channel.setPad() -- rendered as a small rectangular block per user
+// direction, not a cone like a tip.
+export const CORE_GRIPPER_PAD_COLOR = 0xc9584f;
 export function tipColorForVolume(maxVolumeUl) {
   if (maxVolumeUl == null) return TIP_PRESENT_COLOR_FALLBACK;
   for (const [threshold, color] of TIP_COLOR_BY_VOLUME) {
@@ -123,4 +129,5 @@ export const LEGEND_ENTRIES = [
   ["Gantry channel", 0xe0b23d],
   ["Thermocycler", 0x8a5a3d],
   ["CO-RE 96 head", 0x4fa8c9],
+  ["CO-RE gripper pad", CORE_GRIPPER_PAD_COLOR],
 ];

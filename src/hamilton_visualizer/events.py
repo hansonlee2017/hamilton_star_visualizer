@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
+from pylabrobot.liquid_handling.standard import ResourceDrop, ResourceMove
 from pylabrobot.resources import Coordinate, Resource
 from pylabrobot.resources.tip import Tip
 from pylabrobot.resources.tip_rack import TipSpot
@@ -38,6 +39,68 @@ def resource_point(resource: Resource, offset: Optional[Coordinate] = None) -> D
 
   loc = _apply_offset(resource.get_absolute_location(x="c", y="c", z="t"), offset)
   return {"x": round(loc.x, 2), "y": round(loc.y, 2), "z": round(loc.z, 2)}
+
+
+def _relocated_point(
+  resource: Resource, destination: Coordinate, offset: Optional[Coordinate] = None
+) -> Dict[str, float]:
+  """Absolute (x, y, z) of the top-center ``resource`` will occupy once it
+  actually arrives at the absolute ``destination`` (its new lfb/origin), in
+  deck mm -- shared by ``resource_drop_point()``/``resource_move_point()``
+  below, see either for why a live location lookup can't be used instead.
+
+  ``resource``'s own (unrotated) half-extents are added the same way
+  ``get_anchor("c", "c", "t")`` would; any rotation the move/drop applies is
+  ignored, same "approximation, not a substitute for real motion planning"
+  scope ``resource_point()`` itself already operates at.
+  """
+
+  anchor = Coordinate(x=resource.get_size_x() / 2, y=resource.get_size_y() / 2, z=resource.get_size_z())
+  loc = _apply_offset(destination + anchor, offset)
+  return {"x": round(loc.x, 2), "y": round(loc.y, 2), "z": round(loc.z, 2)}
+
+
+def resource_drop_point(drop: ResourceDrop) -> Dict[str, float]:
+  """Absolute (x, y, z) of the top-center ``drop.resource`` will occupy once
+  released, in deck mm.
+
+  Deliberately does *not* go through ``resource_point()`` (i.e.
+  ``drop.resource.get_absolute_location(...)``) the way every other event
+  in this module does: by the time a backend's ``drop_resource()`` is
+  called (and this runs), ``drop.resource`` is still parented at its *old*
+  location -- ``LiquidHandler.drop_resource()`` only calls ``unassign()``/
+  reassigns it to its real new parent *after* awaiting the backend call
+  (confirmed by reading ``LiquidHandler.drop_resource()``'s source), so a
+  live location lookup here would report where the resource *was*, not
+  where it's headed -- exactly wrong for an event meant to animate the
+  drop. ``drop.destination`` is already resolved to an absolute
+  ``Coordinate`` before ``ResourceDrop`` is even constructed (same method
+  resolves whatever ``to=`` was passed -- a Resource, ResourceHolder,
+  Coordinate, Trash, PlateAdapter, etc. -- into one first), so it's used
+  as the base in place of a live lookup.
+  """
+
+  return _relocated_point(drop.resource, drop.destination, drop.offset)
+
+
+def resource_move_point(move: ResourceMove) -> Dict[str, float]:
+  """Absolute (x, y, z) of the top-center ``move.resource`` will occupy at
+  this ``move_picked_up_resource`` leg's own intermediate stop, in deck mm.
+
+  Same staleness reasoning as ``resource_drop_point()``: a resource being
+  carried through one or more ``intermediate_locations`` (see
+  ``LiquidHandler.move_resource()``) is never reparented mid-carry -- only
+  the final ``drop_resource()`` call does that -- so it stays parented at
+  its *original* (pre-pickup) location for the entire carry, making a live
+  lookup wrong here too. ``move.location`` is the raw absolute ``Coordinate``
+  passed as this leg's own ``to=`` (confirmed by reading
+  ``LiquidHandler.move_resource()``'s source: ``await
+  self.move_picked_up_resource(to=intermediate_location)`` forwards it
+  unchanged), the same "already-resolved absolute destination" shape
+  ``drop.destination`` has.
+  """
+
+  return _relocated_point(move.resource, move.location, move.offset)
 
 
 def tip_grab_point(tip_spot: TipSpot, tip: Tip, offset: Optional[Coordinate] = None) -> Dict[str, float]:

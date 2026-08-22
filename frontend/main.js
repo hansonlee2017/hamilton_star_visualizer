@@ -31,6 +31,8 @@ import {
   ensureChannels,
   handleOpEvent,
   setRestZ,
+  setSceneRoot,
+  updateCarriedPlate,
 } from "./gantry.js";
 import { applyState } from "./resource-state.js";
 import { connect } from "./websocket.js";
@@ -65,6 +67,10 @@ scene.add(fillLight);
 const sceneRoot = new THREE.Group();
 scene.add(sceneRoot);
 scene.add(gantryGroup);
+// gantry.js needs this for a CoRe-gripper drop's reparent-back-to-the-scene
+// step -- see that module's own setSceneRoot() comment for why it can't
+// just own sceneRoot itself.
+setSceneRoot(sceneRoot);
 
 let frustumHalfHeight = 400; // updated once we know the deck size
 
@@ -169,6 +175,7 @@ function animate(now) {
   lastTime = now;
   for (const ch of channels) ch.update(dt);
   core96Head.update(dt);
+  updateCarriedPlate(dt);
   // Every resource's own AnimationQueue (currently only ever populated for
   // "thermocycler" -- see thermocycler.js) -- one uniform loop rather than
   // per-category wiring here, so a future category that wants sequenced

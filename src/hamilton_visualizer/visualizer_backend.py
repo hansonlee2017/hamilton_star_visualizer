@@ -15,9 +15,10 @@ identically whether ``inner`` talks to real hardware or not.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pylabrobot.liquid_handling.backends.backend import LiquidHandlerBackend
+from pylabrobot.liquid_handling.backends.chatterbox import LiquidHandlerChatterboxBackend
 from pylabrobot.liquid_handling.standard import (
   Drop,
   DropTipRack,
@@ -36,9 +37,58 @@ from pylabrobot.liquid_handling.standard import (
 from pylabrobot.resources import Deck, Tip, TipRack, set_tip_tracking, set_volume_tracking
 from pylabrobot.resources.tip_tracker import TipTracker
 
-from hamilton_visualizer.events import channel_ops_event, resource_event
+from hamilton_visualizer.events import channel_ops_event, resource_drop_point, resource_event, resource_move_point
 from hamilton_visualizer.scene import build_scene
 from hamilton_visualizer.server import VisualizerServer
+
+
+def _patch_chatterbox_resource_kwargs() -> None:
+  """Monkey-patch ``LiquidHandlerChatterboxBackend.pick_up_resource``/
+  ``move_picked_up_resource``/``drop_resource`` to accept (and print)
+  arbitrary ``**backend_kwargs``, matching every *other* chatterbox
+  method's own signature.
+
+  Confirmed by reading ``chatterbox.py``: ``pick_up_tips``/``drop_tips``/
+  ``pick_up_tips96``/``drop_tips96``/``aspirate``/``dispense`` all accept
+  ``**backend_kwargs`` (aspirate/dispense even print a couple of them),
+  but these three resource-movement methods take *only* their one
+  positional dataclass argument -- a real gap in chatterbox.py, not a
+  deliberate difference, since a real hardware backend (see
+  ``STARBackend.pick_up_resource``/``drop_resource``) very much accepts
+  extra kwargs here (``use_arm``, ``core_front_channel``, etc.). Without
+  this patch, ``VisualizerBackend`` blind-forwarding ``use_arm="core"``
+  etc. to ``self._inner.X(dataclass, **backend_kwargs)`` -- the same
+  established pattern ``pick_up_tips``/``aspirate``/``dispense`` already
+  use below -- would crash every demo in this project the moment a
+  CoRe-gripper call is made (they all run on a chatterbox backend).
+
+  Applied once, to the class itself, at import time -- every
+  ``LiquidHandlerChatterboxBackend`` instance is affected, not just ones
+  wrapped by a ``VisualizerBackend``, matching this being a genuine
+  upstream gap rather than something specific to this project.
+  """
+
+  if getattr(LiquidHandlerChatterboxBackend, "_hamilton_visualizer_resource_kwargs_patched", False):
+    return  # idempotent -- guards against this module being imported more than once
+
+  for method_name in ("pick_up_resource", "move_picked_up_resource", "drop_resource"):
+    original = getattr(LiquidHandlerChatterboxBackend, method_name)
+
+    def make_patched(original=original):
+      async def patched(self, arg, **backend_kwargs):
+        result = await original(self, arg)
+        if backend_kwargs:
+          print(f"  ({', '.join(f'{k}={v!r}' for k, v in backend_kwargs.items())})")
+        return result
+
+      return patched
+
+    setattr(LiquidHandlerChatterboxBackend, method_name, make_patched())
+
+  LiquidHandlerChatterboxBackend._hamilton_visualizer_resource_kwargs_patched = True
+
+
+_patch_chatterbox_resource_kwargs()
 
 
 def _well_volume_entries(wells: List[Any]) -> List[Dict[str, Any]]:
@@ -87,6 +137,18 @@ class VisualizerBackend(LiquidHandlerBackend):
     self._inner = inner
     self._server = server
     self._enable_tracking = enable_tracking
+    # (back_channel, front_channel) currently holding the CoRe gripper
+    # pads, or None if they're parked at core_grippers -- our own copy of
+    # what STARBackend tracks internally as `core_parked` (see
+    # STAR_backend.py's pick_up_core_gripper_tools()/
+    # return_core_gripper_tools()), needed regardless of what `inner`
+    # actually is (a chatterbox backend doesn't track this at all, and we
+    # need to know it either way to decide whether a pickup needs its own
+    # "channels attach to the pads first" animation -- see
+    # core_pick_up_resource()'s own comment). Per user direction: persists
+    # across moves, matching real hardware, rather than re-attaching on
+    # every single core-arm pickup regardless.
+    self._core_gripper_channels: Optional[Tuple[int, int]] = None
 
   # -- passthrough properties -------------------------------------------
   @property
@@ -346,19 +408,130 @@ class VisualizerBackend(LiquidHandlerBackend):
       event["wells"] = _well_volume_entries(dispense.wells)
     await self._server.broadcast(event)
 
-  # -- resource movement (moving plates is out of scope for v1 animation; --
-  # -- forwarded and logged so the event log panel still shows it) --------
-  async def pick_up_resource(self, pickup: ResourcePickup) -> None:
-    await self._inner.pick_up_resource(pickup)
-    await self._server.broadcast(resource_event("pick_up_resource", pickup.resource, offset=pickup.offset))
+  # -- resource movement ----------------------------------------------------
+  # Two arms can move a resource in real PyLabRobot: the iSWAP (the
+  # default -- a separate, unmodeled-in-this-project mechanism) and the
+  # CoRe gripper (``use_arm="core"``, explicit opt-in per user direction --
+  # two of the 8 pipetting channels grab a pair of gripper pads parked at
+  # the deck's own ``core_grippers`` resource -- see hamilton_decks.py's
+  # ``hamilton_core_gripper_1000uL_5mL_on_waste()``, every ``STARDeck``/
+  # ``STARLetDeck``'s default -- and use them to clamp and carry a plate).
+  # Only ``use_arm="core"`` calls get the new attach-pads/carry-plate
+  # animation (``core_pick_up_resource``/``core_move_picked_up_resource``/
+  # ``core_drop_resource`` events below); everything else (the default, or
+  # an explicit ``use_arm="iswap"``) keeps the original plain
+  # ``resource_event()`` broadcast -- log-only/unanimated, same as before
+  # this feature existed.
+  #
+  # ``use_arm``/``core_front_channel``/``channel_1``/``channel_2``/
+  # ``return_core_gripper`` are peeked out of ``backend_kwargs`` (not
+  # popped), mirroring aspirate()/dispense()'s own
+  # ``traverse_height_mm``/``end_height_mm`` handling just above -- the
+  # full dict still gets forwarded to ``self._inner`` unchanged, matching
+  # every other op in this class. This only works against a chatterbox
+  # inner because of ``_patch_chatterbox_resource_kwargs()`` above -- see
+  # its own docstring; a real ``STARBackend`` already accepts every one of
+  # these natively.
+  async def pick_up_resource(self, pickup: ResourcePickup, **backend_kwargs) -> None:
+    await self._inner.pick_up_resource(pickup, **backend_kwargs)
 
-  async def move_picked_up_resource(self, move: ResourceMove) -> None:
-    await self._inner.move_picked_up_resource(move)
-    await self._server.broadcast(resource_event("move_picked_up_resource", move.resource, offset=move.offset))
+    use_arm = backend_kwargs.get("use_arm", "iswap")
+    if use_arm != "core":
+      await self._server.broadcast(resource_event("pick_up_resource", pickup.resource, offset=pickup.offset))
+      return
 
-  async def drop_resource(self, drop: ResourceDrop) -> None:
-    await self._inner.drop_resource(drop)
-    await self._server.broadcast(resource_event("drop_resource", drop.resource, offset=drop.offset))
+    # Same resolution STARBackend.pick_up_resource() itself does for its
+    # deprecated channel_1/channel_2 pair (both must be given together;
+    # channel_2 must be channel_1 + 1; front_channel = channel_2 - 1, i.e.
+    # channel_1) -- see STAR_backend.py's own pick_up_resource().
+    channel_1 = backend_kwargs.get("channel_1")
+    channel_2 = backend_kwargs.get("channel_2")
+    front_channel = backend_kwargs.get("core_front_channel", 7)
+    if channel_1 is not None or channel_2 is not None:
+      assert channel_1 is not None and channel_2 is not None, "Both channel_1 and channel_2 must be provided"
+      assert channel_1 + 1 == channel_2, "channel_2 must be channel_1 + 1"
+      front_channel = channel_2 - 1
+    back_channel = front_channel - 1
+
+    # Mirrors STARBackend's own core_parked/pick_up_core_gripper_tools()
+    # gating (see core_pick_up_resource(): "if self.core_parked: await
+    # self.pick_up_core_gripper_tools(front_channel=front_channel)") --
+    # pads only need a fresh "channels attach to the pads" animation when
+    # they aren't already attached to this exact channel pair. Persists
+    # across moves rather than re-attaching on every pickup, per user
+    # direction: matches real hardware, where the pads stay clamped onto
+    # the channels between moves unless explicitly returned (see
+    # drop_resource() below).
+    needs_attach = (back_channel, front_channel) != self._core_gripper_channels
+    self._core_gripper_channels = (back_channel, front_channel)
+
+    await self._server.broadcast(
+      resource_event(
+        "core_pick_up_resource",
+        pickup.resource,
+        offset=pickup.offset,
+        back_channel=back_channel,
+        front_channel=front_channel,
+        needs_attach=needs_attach,
+      )
+    )
+
+  async def move_picked_up_resource(self, move: ResourceMove, **backend_kwargs) -> None:
+    await self._inner.move_picked_up_resource(move, **backend_kwargs)
+
+    use_arm = backend_kwargs.get("use_arm", "iswap")
+    op_name = "core_move_picked_up_resource" if use_arm == "core" else "move_picked_up_resource"
+    # Uses resource_move_point(), not resource_event()'s usual
+    # resource_point() -- same staleness reasoning as drop_resource()'s own
+    # resource_drop_point() below: a resource being carried through an
+    # intermediate waypoint is never reparented mid-carry (only the final
+    # drop_resource() does that), so it's still parented at its *original*
+    # pre-pickup location for the whole carry.
+    event = {
+      "type": "op",
+      "op": op_name,
+      "resource": move.resource.name,
+      **resource_move_point(move),
+    }
+    # self._core_gripper_channels should always be set by this point for a
+    # real protocol (move_picked_up_resource only ever follows a
+    # pick_up_resource for the same resource), but a None guard costs
+    # nothing and avoids a crash if this is ever called out of that order.
+    if use_arm == "core" and self._core_gripper_channels is not None:
+      event["back_channel"], event["front_channel"] = self._core_gripper_channels
+    await self._server.broadcast(event)
+
+  async def drop_resource(self, drop: ResourceDrop, **backend_kwargs) -> None:
+    await self._inner.drop_resource(drop, **backend_kwargs)
+
+    use_arm = backend_kwargs.get("use_arm", "iswap")
+    if use_arm != "core":
+      await self._server.broadcast(resource_event("drop_resource", drop.resource, offset=drop.offset))
+      return
+
+    return_core_gripper = backend_kwargs.get("return_core_gripper", True)
+    back_channel, front_channel = self._core_gripper_channels or (None, None)
+    if return_core_gripper:
+      # Mirrors STARBackend's own core_release_picked_up_resource(...,
+      # return_tool=return_core_gripper)/return_core_gripper_tools() --
+      # pads go back to core_grippers and need a fresh attach next pickup.
+      self._core_gripper_channels = None
+
+    # Uses resource_drop_point(), not resource_event()'s usual
+    # resource_point() -- see that function's own docstring for why a live
+    # location lookup on drop.resource would be wrong here (it's still
+    # parented at its *old* location at this point in the call).
+    await self._server.broadcast(
+      {
+        "type": "op",
+        "op": "core_drop_resource",
+        "resource": drop.resource.name,
+        **resource_drop_point(drop),
+        "back_channel": back_channel,
+        "front_channel": front_channel,
+        "return_core_gripper": return_core_gripper,
+      }
+    )
 
   # -- misc passthroughs ----------------------------------------------------
   async def request_tip_presence(self):
