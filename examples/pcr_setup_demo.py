@@ -36,18 +36,19 @@ the lid is a real child of the plate, so its absolute position simply
 recomputes once the plate's own location changes, no separate backend
 call needed (matches reality: a capped microplate is picked up and
 carried by its own edges, with the lid just resting on top via friction,
-not gripped separately). This project's own visualizer, though, only
-ever animates a resource when it actually receives an "op" event for
-it -- there's no mechanism (yet) for "this resource rides along
-whenever *that other* resource moves" -- so this script issues one
-extra, otherwise-redundant ``move_lid(plate.lid, plate, use_arm="core")``
-call right after each of those two plate moves, re-seating the lid back
-onto the very same plate it's already (data-model-wise) sitting on. It's
-a genuine, valid PyLabRobot call (pick up the currently-seated lid, put
-it right back down in the same relative spot) that changes nothing about
-the final resource tree -- its only purpose is to give the frontend an
-actual event to animate the lid visibly traveling along with the plate,
-instead of being left behind, motionless, at the plate's old site.
+not gripped separately). This script doesn't need to do anything extra
+for that any more: the visualizer's own frontend learns "this lid is
+seated on this plate" the moment step 2's cap operation actually seats
+it (a real PyLabRobot resource-tree signal -- see
+``VisualizerBackend._register_reparent_callbacks()`` -- not just the
+gripper op itself), and keeps the lid attached to the plate's own group
+from then on, so every later plate-only move (steps 3 and 5) carries it
+along automatically, with no lid-specific event at all. An earlier
+version of this script issued a second, otherwise-redundant
+``move_lid(plate.lid, plate, use_arm="core")`` call right after each of
+those two plate moves purely to give the frontend *some* event to animate
+the lid with -- no longer needed now that the frontend derives this
+relationship from the real resource tree instead.
 ``return_core_gripper=False`` on every leg of a capped-plate move except
 the very last keeps the same two channels attached across both calls,
 rather than returning and re-attaching the pads in between for no reason.
@@ -203,10 +204,7 @@ async def main() -> None:
     await tc.open_lid()
 
     print("Moving the capped plate onto the thermocycler...")
-    await lh.move_plate(pcr_plate, tc, use_arm="core", return_core_gripper=False)
-    # Redundant re-seat, purely so the frontend animates the lid traveling
-    # along too -- see this module's own docstring for why.
-    await lh.move_lid(pcr_plate.lid, pcr_plate, use_arm="core", return_core_gripper=False)
+    await lh.move_plate(pcr_plate, tc, use_arm="core")
 
     # -- 4. Cycle: close the door, run the real protocol --------------------
     print("Closing the thermocycler's lid...")
@@ -220,8 +218,7 @@ async def main() -> None:
     await tc.open_lid()
 
     print("Moving the capped plate back to its carrier site...")
-    await lh.move_plate(pcr_plate, plate_carrier[0], use_arm="core", return_core_gripper=False)
-    await lh.move_lid(pcr_plate.lid, pcr_plate, use_arm="core", return_core_gripper=False)
+    await lh.move_plate(pcr_plate, plate_carrier[0], use_arm="core")
 
     # -- 6. Uncap: lid moves back to its own original site -------------------
     print("Moving the lid back to its own site...")

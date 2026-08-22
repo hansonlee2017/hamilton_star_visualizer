@@ -32,7 +32,6 @@ import {
   handleOpEvent,
   setRestZ,
   setSceneRoot,
-  updateCarriedPlate,
 } from "./gantry.js";
 import { applyState } from "./resource-state.js";
 import { connect } from "./websocket.js";
@@ -175,7 +174,12 @@ function animate(now) {
   lastTime = now;
   for (const ch of channels) ch.update(dt);
   core96Head.update(dt);
-  updateCarriedPlate(dt);
+  // A gripped or seated resource needs no per-frame update call of its
+  // own any more -- it's a real THREE.js child of whatever's carrying it
+  // (a channel's group while gripped, another resource's group while
+  // seated on it -- see gantry.js's attachResourceTo()), so its world
+  // position falls straight out of the normal renderer.render() below,
+  // the same way every other nested scene-graph child already does.
   // Every resource's own AnimationQueue (currently only ever populated for
   // "thermocycler" -- see thermocycler.js) -- one uniform loop rather than
   // per-category wiring here, so a future category that wants sequenced

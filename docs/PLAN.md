@@ -3661,6 +3661,156 @@ builder.js`, ticking every channel, the 96-head, `updateCarriedPlate()`,
       looks like), and is considered sufficient to trust this fix in the
       meantime.
 
+## Review round 46
+
+User feedback after "Review round 45" landed: "The animation between the
+pipette and the lid/plate are still out of sync. Even more, the lid and
+the plate don't move together. I am wondering if there is some more
+robust way to manage the queue so we don't have to keep putting bespoke
+numbers of no-ops or padding in the queue of every objects." A planning
+pass (see the session's own plan document for the full architecture
+overview and alternatives considered) concluded the previous three
+rounds' whole approach -- independent per-object animation queues kept in
+sync by hand-computed padding numbers -- was structurally fragile by
+design, not just buggy in its current numbers, and that the "lid and
+plate don't move together" complaint specifically wasn't a timing bug at
+all: `pcr_setup_demo.py`'s own "redundant re-seat" workaround made the
+lid's move a *separate, sequential* op from the plate's, so they could
+only ever render sequentially however well-synced each was individually.
+Chosen fix: two structural changes instead of another padding-arithmetic
+patch.
+
+- [x] **Condition-gated wait tasks, replacing precomputed-duration
+      padding.** `AnimationQueue` (`animation-queue.js`) gained a new task
+      shape -- `{ waitUntil: () => boolean }`, polled every real frame,
+      completing the instant it first returns true, contributing `0` to
+      `remainingMs` (duration unknowable in advance, same documented
+      limitation as an unresolved function-valued duration). Self-
+      correcting by construction: no number to get wrong, no rounding-loss
+      bookkeeping, and (unlike a fixed-duration hold) automatically
+      correct even if more work gets added to whatever it's waiting on
+      after the wait was enqueued.
+- [x] **Real THREE.js scene-graph attachment, replacing the independently-
+      tweened `CarriedPlate` twin.** `CarriedPlate`/`carriedPlates`/
+      `animateCarriedPlateTo()`/`holdCarriedPlate()` are gone entirely.
+      While a resource is gripped, its `entry.group` is reparented
+      directly under the gripping channel's own `THREE.Group` (via a new
+      `attachResourceTo()`, called from the grip-descend leg's own
+      `onArrive` -- not before, matching the existing "shouldn't visibly
+      move until the channels have actually arrived" timing) and simply
+      *inherits* wherever that channel goes every frame, via ordinary
+      THREE.js transform propagation -- no separate queue, no leg
+      matching, no possibility of drift by construction. Released the
+      same way, at the drop's own descend-leg `onArrive`, not
+      synchronously at handler-run time the way the old design had to
+      (that early-reparent was only ever needed because the old
+      `CarriedPlate` had to already exist for a *later* event to enqueue
+      onto -- moot now that there's no separate queue to race against).
+      This also made `gantryRemainingMs()`/`preexistingMs`/
+      `holdCarriedPlate()` unnecessary for the CoRe-gripper case
+      entirely: a channel's own FIFO enqueue order already guarantees its
+      approach legs play after whatever was queued on it before, for
+      free. `gantryRemainingMs()` survives, narrowed to channels + the
+      96-head, feeding the one remaining `waitUntil` caller
+      (`waitForGantry()`, for the thermocycler's own lid-slide/shimmer).
+- [x] **Persistent seated-on-resource attachment, fixing the choreography
+      problem at its root.** New backend signal
+      (`VisualizerBackend._register_reparent_callbacks()`,
+      `visualizer_backend.py`): a single subscription on the deck's own
+      `register_did_assign_resource_callback()`, relying on PyLabRobot's
+      own built-in "propagate up the tree" mechanism (`assign_child_
+      resource()`'s own comment) to observe every real resource-tree
+      reparent anywhere in the deck's subtree from one registration --
+      confirmed via a standalone script that registering *recursively*
+      instead (the same pattern `_register_state_callbacks()` already
+      uses for a different purpose) would have fired once per ancestor
+      level for a single event, a real near-bug caught before it shipped.
+      Broadcasts a new `"resource_reparented"` op event (`{resource,
+      parent}`) the instant PyLabRobot's own `assign_child_resource()`
+      actually reassigns a resource -- confirmed via reading
+      `liquid_handler.py` that `pick_up_resource()` never touches
+      `resource.parent`, only `drop_resource()` does, so this event is
+      always paired 1:1 with a real `core_drop_resource` op for the same
+      resource. Frontend: a new `"resource_reparented"` case queues the
+      decision (`entry.pendingParents`, a FIFO array -- see below for why
+      not a single field) for `core_drop_resource`'s own release callback
+      to dequeue and apply once that specific drop's animation has
+      actually finished playing; `isFixedInstallation()` (reusing
+      `categories.js`'s own `CARRIER_CATEGORIES`, plus a `*_holder` suffix
+      check) filters out plain carrier/holder/deck parents (stay under
+      `sceneRoot`, unchanged) from genuinely movable payload parents (a
+      plate, seating a lid onto it). Because reparenting the *parent*
+      resource under a channel (while gripped) already carries any
+      attached *child* along automatically -- ordinary THREE.js hierarchy
+      nesting, zero special-case code -- this let `pcr_setup_demo.py`
+      delete both of its old "redundant re-seat" `move_lid()` calls
+      entirely: the lid now rides along on every plate-only move for
+      free, with no lid-specific event at all.
+- [x] **Two real bugs found and fixed during verification, both via a live
+      end-to-end replay, neither visible from reading the code alone:**
+  - `attachResourceTo()`'s original version wrote an absolute world
+    coordinate straight into `entry.group.position` before calling
+    `.attach()` -- correct only when the resource's *current* parent has
+    an identity transform (true once a resource has been through its own
+    first `core_drop_resource`, which always ends by reparenting to
+    `sceneRoot`), but **not** true the very first time a resource is ever
+    picked up: at that point it's still nested exactly where
+    `scene-builder.js`'s own `buildResourceObject()` originally put it (a
+    carrier's own site-holder group, itself a real, non-identity-
+    transformed child of the carrier). Confirmed live: this manifested as
+    the lid's very first pickup snapping to roughly *double* its own real
+    coordinates in one frame -- `.attach()` itself was never the bug (an
+    isolated THREE.js-only repro confirmed it always preserves whatever
+    world position an object is actually at); the bug was computing the
+    wrong one to preserve. Fixed by routing through `sceneRoot.attach()`
+    first, normalizing local-under-an-arbitrary-parent into a true world
+    position before overwriting it.
+  - `entry.pendingParents` was originally a single mutable field
+    (`entry.pendingParent`), not a queue -- broke the exact same way the
+    much earlier `carriedPlate` singular-slot bug did (see "Review round
+    44"'s own writeup): every op event for an entire run arrives
+    essentially all at once, well before any of them finishes playing, so
+    a resource reparented more than once in one run (every lid in this
+    project's own demos: capped, then uncapped) had *both* of its
+    `resource_reparented` events queued up before *either* of its own
+    drops' `onArrive` callbacks had fired. A single field ended up holding
+    whichever one arrived *last* (the uncap's, correctly `null`) by the
+    time the *first* drop's (the cap's) own `onArrive` read it --
+    silently discarding the "seat it on the plate" decision, leaving the
+    lid parented under `sceneRoot`, and exactly explaining why the lid
+    never visibly rode along with the plate despite the demo no longer
+    sending it any events at all. Fixed by making it a FIFO array,
+    pushed by every `resource_reparented` event and shifted by
+    `core_drop_resource`'s own release callback -- matching each drop to
+    the correct one in order, the same fix shape "Review round 44"
+    already established for the analogous `carriedPlates` problem.
+- [x] Verified with the same faithful event-capture-and-replay technique
+      "Review round 44"/"45" established, re-run against the now-
+      simplified `pcr_setup_demo.py` (confirming its own redundant
+      re-seat calls are gone: no lid-specific event anywhere near either
+      of the plate's own thermocycler moves in the captured stream) and
+      driven through the real frontend modules with the same per-frame
+      ticking `main.js`'s own `animate()` loop uses: pipettes still
+      finish before the lid/plate's first real movement (44.7s/49.3s vs.
+      a 41.6s fill); the lid and plate are both actively moving on 132 of
+      the same real frames (not just eventually arriving at the same
+      place, genuinely riding together); the lid lands back at its exact
+      original position (bit-for-bit equal world coordinates) after the
+      full four-pickup round trip; no single-frame jump exceeds a
+      generous 100mm threshold (max observed: 39.5mm, consistent with
+      fast-but-continuous eased travel, not a teleport). Also re-verified
+      `core_gripper_demo.py`'s own simpler plain-plate, no-lid, three-move
+      round trip (with `return_core_gripper=False` keeping the pads
+      attached across the first two moves) reaches its exact expected
+      final position with no regression. All 34 pre-existing unit tests
+      (extended with new `waitUntil` coverage for `AnimationQueue`) still
+      pass.
+- [x] Live browser verification remains blocked by the same environment-
+      level Browser-pane-not-compositing constraint "Review round 44"/"45"
+      documented -- unchanged this round; the faithful replay technique
+      above is considered sufficient to trust this fix in the meantime,
+      per that same established reasoning.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

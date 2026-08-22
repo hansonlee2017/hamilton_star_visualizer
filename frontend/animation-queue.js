@@ -29,6 +29,10 @@ export class AnimationQueue {
   //   onStart?: () => void,
   //   onTick: (t: number) => void,   // t in [0, 1], linear
   //   onComplete?: () => void,
+  // } | {
+  //   waitUntil: () => boolean,
+  //   onStart?: () => void,
+  //   onComplete?: () => void,
   // }
   //
   // `duration` may be a function -- resolved once, right when this task
@@ -38,6 +42,19 @@ export class AnimationQueue {
   // captured at enqueue time can be stale by the time this task's turn
   // actually comes, e.g. a duration that depends on getDurationScale() and
   // the HUD's speed dropdown changed in between.
+  //
+  // `waitUntil` is a different kind of task entirely: no `duration`/
+  // `onTick`, just a condition re-checked every real frame, completing the
+  // instant it first returns true -- see update()'s own handling. Meant
+  // for "don't start my *next* real task until some other queue/condition
+  // elsewhere has caught up" (e.g. gantry.js's waitForGantry()), where a
+  // *precomputed* duration is the wrong tool: it has to be recomputed
+  // correctly at the exact right moment, can't react if more work gets
+  // added to the thing being waited on after it was computed, and (see
+  // docs/PLAN.md's "Review round 44"/"Review round 45") is exactly the
+  // class of bug a fixed-duration hold kept reintroducing. A live
+  // condition is self-correcting by construction: it simply doesn't
+  // complete until it's actually true, however long that ends up taking.
   enqueue(task) {
     this._queue.push(task);
   }
@@ -67,9 +84,16 @@ export class AnimationQueue {
   // codebase currently reads remainingMs on a queue that also has
   // function-valued tasks queued (only ticked, never introspected this
   // way), so this is a documented limitation, not an active bug.
+  //
+  // A `waitUntil` task -- active or still queued -- also contributes 0,
+  // for the same reason: its real duration isn't knowable in advance
+  // (that's the whole point of it being a live condition, not a
+  // precomputed number). Any *fixed*-duration task queued behind it still
+  // counts normally, since its own duration is known regardless of how
+  // long the wait ahead of it takes.
   get remainingMs() {
     let total = 0;
-    if (this._current) {
+    if (this._current && !this._current.waitUntil) {
       total += Math.max(0, this._current.duration - this._current.elapsed);
     }
     for (const task of this._queue) {
@@ -82,14 +106,28 @@ export class AnimationQueue {
     if (!this._current) {
       this._current = this._queue.shift();
       if (this._current) {
-        this._current.elapsed = 0;
         this._current.onStart?.();
-        if (typeof this._current.duration === "function") {
-          this._current.duration = this._current.duration();
+        if (!this._current.waitUntil) {
+          this._current.elapsed = 0;
+          if (typeof this._current.duration === "function") {
+            this._current.duration = this._current.duration();
+          }
         }
       }
     }
     if (!this._current) return;
+
+    if (this._current.waitUntil) {
+      // No `elapsed`/`duration`/`onTick` bookkeeping at all -- just poll
+      // the condition every real frame and complete the instant it's
+      // first true, however many frames that takes.
+      if (this._current.waitUntil()) {
+        const { onComplete } = this._current;
+        this._current = null;
+        onComplete?.();
+      }
+      return;
+    }
 
     this._current.elapsed += dtMs;
     const t = Math.min(1, this._current.elapsed / this._current.duration);

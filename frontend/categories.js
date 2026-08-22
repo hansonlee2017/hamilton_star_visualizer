@@ -33,7 +33,7 @@ export const CATEGORY_COLORS = {
   // completely different thing, the instrument's own opening mechanism,
   // not a labware resource at all). A real, standalone Lid resource
   // (pylabrobot.resources.lid.Lid) moved by the CoRe gripper just like
-  // any other resource -- see gantry.js's CarriedPlate, which is
+  // any other resource -- see gantry.js's attachResourceTo(), which is
   // resource-type-agnostic.
   lid: 0xbfe3ef,
   well: 0x59c9a5,

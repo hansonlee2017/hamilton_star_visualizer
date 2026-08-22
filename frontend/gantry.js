@@ -7,7 +7,13 @@
 
 import * as THREE from "three";
 import { mapPoint } from "./coordinates.js";
-import { tipColorForVolume, EMPTY_COLOR, TIP_PRESENT_COLOR_FALLBACK, CORE_GRIPPER_PAD_COLOR } from "./categories.js";
+import {
+  tipColorForVolume,
+  EMPTY_COLOR,
+  TIP_PRESENT_COLOR_FALLBACK,
+  CORE_GRIPPER_PAD_COLOR,
+  CARRIER_CATEGORIES,
+} from "./categories.js";
 import { TIP_PYRAMID_RADIUS, TIP_PYRAMID_HEIGHT, resourceIndex } from "./scene-builder.js";
 import { applyEmbeddedResourceState } from "./resource-state.js";
 import { queueLidAnimation, queueThermocyclerShimmer } from "./thermocycler.js";
@@ -846,84 +852,104 @@ const CORE_GRIP_HALF_SPAN_MM = 40;
 // scene-builder.js's thermocycler lid clearance already use.
 const CORE_GRIP_CHANNEL_Z_OFFSET_MM = CORE_GRIPPER_PAD_HEIGHT_MM / 2 + 2;
 
-// The resource currently gripped and being carried, or null -- at most one
-// at a time (a real CoRe gripper only ever holds one resource). Its own
-// THREE group has been reparented into `gantryGroup` (see
-// "core_pick_up_resource" below) and is driven by this MotionUnit-backed
-// wrapper the same rise/x/y/descend leg shape Channel/Core96Head use for
-// their own motion, just converting each leg's target (a resource's
-// top-center point, matching every other op's msg.x/y/z -- see events.py's
-// resource_point()/resource_drop_point()/resource_move_point()) into the
-// group's own left-front-bottom-anchored local frame on every tick (see
-// applyPosition() below) rather than needing every call site here to do
-// that conversion itself.
-class CarriedPlate {
-  constructor(resourceName, initialTopCenter) {
-    this.resourceName = resourceName;
-    this.motion = new MotionUnit({ ...initialTopCenter }, () => this.applyPosition());
-  }
-
-  applyPosition() {
-    const entry = resourceIndex.get(this.resourceName);
-    if (!entry) return;
-    const node = entry.node;
-    // Undo resource_point()'s own "top-center" anchor -- the group's own
-    // local frame origin is the resource's left-front-bottom corner (same
-    // convention scene-builder.js's buildResourceObject() positions every
-    // group by by), not its top-center, so this has to subtract back out
-    // exactly the half-extents/full-height resource_point() added -- the
-    // mirror image of events.py's own _relocated_point() helper.
-    const lfb = {
-      x: this.motion.pos.x - (node.size_x ?? 0) / 2,
-      y: this.motion.pos.y - (node.size_y ?? 0) / 2,
-      z: this.motion.pos.z - (node.size_z ?? 0),
-    };
-    entry.group.position.copy(mapPoint(lfb.x, lfb.y, lfb.z));
-  }
-
-  enqueue(target, duration, onComplete) {
-    this.motion.enqueue(target, duration, onComplete);
-  }
-
-  update(dtMs) {
-    this.motion.update(dtMs);
-  }
+// Converts a resource's own "top-center" point (matching every op event's
+// msg.x/y/z -- see events.py's resource_point()/resource_drop_point()/
+// resource_move_point()) into the world-space position its group's own
+// left-front-bottom-anchored local frame should sit at -- the mirror
+// image of events.py's own _relocated_point() helper. Factored out of
+// what used to be CarriedPlate.applyPosition() (see git history) since
+// it's now needed at each of a resource's *discrete* attach/release
+// moments (see attachResourceTo() below) rather than continuously, every
+// tick, from one dedicated queue.
+function resourceWorldPosition(node, topCenter) {
+  const lfb = {
+    x: topCenter.x - (node.size_x ?? 0) / 2,
+    y: topCenter.y - (node.size_y ?? 0) / 2,
+    z: topCenter.z - (node.size_z ?? 0),
+  };
+  return mapPoint(lfb.x, lfb.y, lfb.z);
 }
 
-// resourceName -> CarriedPlate, one per resource this session has ever
-// picked up with the CoRe gripper -- *not* a single shared slot, even
-// though a real gripper only ever physically holds one resource at a
-// time. The demo scripts this feature supports routinely alternate which
-// resource is currently gripped *faster than each one's own visual
-// journey can finish playing* -- e.g. pcr_setup_demo.py's own "cap the
-// plate with its lid, then immediately pick the plate itself up and
-// carry it to the ODTC" -- and a single shared slot, replaced on every
-// pickup, orphaned whichever resource's own queue hadn't finished
-// draining yet the moment a *different* resource got picked up next:
-// nothing ever ticks it again (only the current slot's occupant gets
-// ticked), so its group froze wherever it happened to be, and the *next*
-// resource that reuses the same underlying variable seeds a fresh
-// MotionUnit from its own current msg.x/y/z -- which, being wherever
-// that resource *data-model-wise* already is by then (its own drop
-// having already run), is nowhere near where its group is still frozen
-// visually -- an instant snap the moment that fresh instance's first leg
-// ticks (user-reported: "the lid movement and the ODTC animations fire
-// right at the beginning instead of waiting for pipetting to finish" --
-// confirmed live: pcr_setup_demo.py's own lid visibly snapped straight to
-// its capped-on-the-plate-at-the-carrier position within the first dozen
-// frames of the whole run, well before the reagent fill -- or even the
-// lid's own cap move -- had actually finished animating). Keying by
-// resource name instead means each resource's own CarriedPlate keeps
-// existing (and keeps getting ticked, see updateCarriedPlate() below)
-// for as long as it takes to finish, entirely independent of whichever
-// *other* resource the gripper has since moved on to.
-const carriedPlates = new Map();
-// Ticked from main.js's render loop alongside every channel/core96Head --
-// see that file's own animate() loop. A plain exported function (not a
-// class main.js has to know about) since main.js otherwise has no reason
-// to reach into this module's gripper state.
-export function updateCarriedPlate(dtMs) {
-  for (const cp of carriedPlates.values()) cp.update(dtMs);
+// Snaps `entry.group`'s *world* position to `topCenter` and reparents it
+// under `newParentGroup` via THREE.Group.attach() -- which recomputes the
+// correct local offset to preserve that exact world position regardless
+// of `newParentGroup`'s own current transform. That last part matters:
+// this project's runtime reparenting now nests resources under
+// *non-identity* parents -- a channel mid-tween, another resource sitting
+// somewhere on the deck -- not just gantryGroup/sceneRoot, the two
+// identity-transformed top-level containers every gripper op used to
+// reparent a carried resource between (where a plain absolute-position
+// write happened to work, by coincidence of both being untransformed, not
+// by any design that generalizes here).
+//
+// This one call is the entire mechanism behind both kinds of attachment
+// this module now uses, replacing what used to be a second, independently
+// -tweened CarriedPlate queue kept in lockstep with the gripping
+// channels' own only by carefully matching leg counts/durations by
+// convention -- exactly the class of bug docs/PLAN.md's "Review round
+// 42"/"44"/"45" kept finding new instances of (rounding-loss desync, then
+// two different absolute-vs-relative wait-duration bugs). While gripped,
+// a resource attaches to the gripping channel's own group (see
+// "core_pick_up_resource"'s grip onArrive below) and simply inherits
+// wherever that channel goes every frame, via ordinary THREE.js transform
+// propagation -- no separate queue, no leg matching, no possibility of
+// drift by construction. Once seated on another resource (see the
+// "resource_reparented" case below), the same call attaches it under
+// *that* resource's own group instead, so it rides along on every future
+// move that resource makes, automatically, with zero events of its own
+// needed -- this is what lets pcr_setup_demo.py drop its old "redundant
+// re-seat" move_lid() workaround entirely (see that script's own current
+// docstring).
+function attachResourceTo(resourceName, topCenter, newParentGroup) {
+  const entry = resourceIndex.get(resourceName);
+  if (!entry || !newParentGroup || !sceneRoot) return;
+  // Routed through sceneRoot first -- the one container in this scene
+  // guaranteed to have an identity transform -- to normalize
+  // entry.group's *local* position into a true world position before
+  // overwriting it, regardless of whatever arbitrary parent it currently
+  // happens to be nested under. Writing an absolute world coordinate
+  // straight into `.position` (skipping this) is only ever correct when
+  // the *current* parent has an identity transform -- true once a
+  // resource has been through at least one core_drop_resource of its own
+  // (which always ends by reparenting to sceneRoot -- see that case
+  // below, or attachResourceTo() itself when it lands somewhere
+  // attachable), but *not* true the very first time a resource is ever
+  // picked up: at that point it's still nested exactly where
+  // scene-builder.js's own buildResourceObject() originally put it (a
+  // carrier's own site-holder group, itself a real, non-identity-
+  // transformed child of the carrier, itself a child of the deck) --
+  // confirmed live: skipping this step wrote the intended world
+  // coordinate as a *local* offset under that still-attached site
+  // holder's own nonzero position instead, and the subsequent
+  // newParentGroup.attach() faithfully preserved that wrong resulting
+  // world position (attach() was never the bug -- it always preserves
+  // whatever world position an object is *actually* at; the bug was
+  // computing a wrong one to preserve in the first place).
+  sceneRoot.attach(entry.group);
+  entry.group.position.copy(resourceWorldPosition(entry.node, topCenter));
+  newParentGroup.attach(entry.group);
+}
+
+// A resource "seated" on one of these is just resting in its ordinary
+// parked spot (a carrier slot, a tip rack's own site, the deck itself),
+// not riding along on something that itself ever moves -- it keeps the
+// plain absolute-deck-mm placement core_drop_resource already gives it
+// (parented under sceneRoot), same as every resource this feature never
+// touches. Only a genuinely *movable* resource (a plate, a lid, a tube,
+// ...) becomes an attachment parent -- see the "resource_reparented" case
+// below, the only reader of this. `CARRIER_CATEGORIES` (categories.js)
+// already covers every carrier this project renders as a fixed shaft,
+// *including* the thermocycler (its own group never moves -- only its
+// lid mesh, a separate child, does -- see thermocycler.js); a `*_holder`
+// suffix (`plate_holder`, and PyLabRobot's generic `resource_holder`)
+// covers a carrier's own numbered site, the resource actually assigned to
+// by a plain drop.
+function isFixedInstallation(category) {
+  return (
+    category === "deck" ||
+    CARRIER_CATEGORIES.has(category) ||
+    (typeof category === "string" && category.endsWith("_holder"))
+  );
 }
 
 // [backChannelIndex, frontChannelIndex] currently showing a pad glyph, or
@@ -1085,140 +1111,46 @@ function padTargets(backChannel, frontChannel, padY, padZ) {
   };
 }
 
-// Same rise/x/y/descend shape as animateGripperChannels(), for the
-// currently-carried plate itself -- called alongside it (never alone) so
-// the plate visibly travels with the two channels gripping it, not just
-// teleporting to each new stop.
-function animateCarriedPlateTo(resourceName, x, y, z, onArrive) {
-  const cp = carriedPlates.get(resourceName);
-  if (!cp) return;
-  cp.enqueue({ x: null, y: null, z: restZ }, scaled(RISE_MS));
-  cp.enqueue({ x, y: null, z: restZ }, scaled(X_MOVE_MS));
-  cp.enqueue({ x, y, z: restZ }, scaled(Y_MOVE_MS));
-  cp.enqueue({ x, y, z }, scaled(DESCEND_MS), onArrive);
-}
-
-// Longest remaining real-world queued duration across the whole gantry
-// apparatus -- every channel, the 96-head, and whatever's currently
-// carried -- i.e. how long until *everything* currently animating has
-// genuinely finished, not just whichever one op happens to be looping
-// over here. Used to make some *other* animation (the thermocycler's own
-// lid-slide/shimmer, or a fresh CoRe-gripper pickup's own hold -- see
-// holdCarriedPlate()) wait for the rest of the scene to visually catch
-// up first, instead of starting the instant its own op event arrives --
-// which, per this whole project's "no realtime delay from a sleep-free
-// backend" design, is routinely while something else (e.g. a preceding
-// 8-channel reagent fill that happened to use the same two channels a
-// CoRe-gripper move defaults to) is still mid-animation. User-reported:
-// "The lid movement and the ODTC animations fire right at the beginning
-// instead of waiting for pipetting to finish" -- confirmed live: the
-// gripping channels' own queues already had the fill's own legs queued
-// ahead of a lid pickup's, so they correctly kept the *channels*
-// themselves from moving early, but nothing told the *lid itself* (a
-// freshly-created, previously-empty CarriedPlate queue) or the
-// *thermocycler's* own animQueue (likewise unrelated to any channel's
-// queue) to wait for that same backlog -- each one only knew about
-// whatever *it* had just been asked to do, not what else was still
-// in-flight elsewhere.
+// Longest remaining real-world queued duration across the shared-X-rail
+// gantry -- every channel and the 96-head -- i.e. how long until the
+// gantry itself has genuinely finished whatever it's doing. Used by
+// waitForGantry() to make the thermocycler's own lid-slide/shimmer (the
+// only remaining caller -- a CoRe-gripper pickup no longer needs this at
+// all, see attachResourceTo()'s own docstring: a gripped resource simply
+// inherits the gripping channel's own motion, and that channel's own
+// FIFO queue *already* guarantees its approach legs play after whatever
+// was queued on it before, with no separate wait needed) wait for the
+// rest of the gantry to visually catch up first, instead of starting the
+// instant its own op event arrives -- which, per this whole project's "no
+// realtime delay from a sleep-free backend" design, is routinely while
+// something else (e.g. a reagent fill that happened to use the same two
+// channels a CoRe-gripper move defaults to) is still mid-animation.
 function gantryRemainingMs() {
   let max = 0;
   for (const ch of channels) max = Math.max(max, ch.motion.remainingMs);
   max = Math.max(max, core96Head.motion.remainingMs);
-  for (const cp of carriedPlates.values()) max = Math.max(max, cp.motion.remainingMs);
   return max;
-}
-
-// Holds the carried plate exactly still (no target change on any axis --
-// MotionUnit's own "stay wherever this leg starts" null-target meaning,
-// see enqueue()'s docstring) until the channels have genuinely finished
-// both (a) whatever was already queued on the gantry *before* this
-// pickup's own legs were added (`preexistingMs`, measured by the caller
-// via gantryRemainingMs() *before* calling animateGripperStop() -- see
-// that function's own docstring for why this needs measuring at all),
-// and (b) this pickup's own newly-added stop(s) (1, or 2 when a
-// pad-attach leg came first). Without (a), the plate's own first *real*
-// travel leg (enqueued later, from a core_move_picked_up_resource/
-// core_drop_resource event) started playing the instant that later
-// event's handler ran, regardless of how much unrelated animation
-// (reagent fill, an earlier move, anything) the gripping channels
-// themselves still had left to play through first. Without (b) -- this
-// function's own earlier form, before `preexistingMs` existed -- the
-// plate started moving before the channels had even *arrived* at it, a
-// narrower version of the same race (see "Review round 42").
-//
-// (a) and (b) are deliberately enqueued differently: (a) as a single
-// combined task (there's no structural relationship between whatever
-// produced that backlog and this carried resource's own timeline -- a
-// reagent fill's own leg boundaries, say -- so there's nothing to
-// frame-match against); (b) as `stops` sets of 4 separate null-target
-// legs (rise/x/y/descend), matching animateGripperStop()'s own per-leg
-// shape exactly -- these *are* structurally the same stop, and
-// AnimationQueue's own per-task completion rounding (see
-// remainingMs()'s own docstring) means a single combined task covering
-// the same nominal duration finishes a few ms *earlier*, in real frames,
-// than the channels' own multi-leg version of it does (confirmed via a
-// standalone simulation of AnimationQueue's real update loop at 60fps:
-// consistently ~66.67ms -- almost exactly 4 frames -- for a 2-stop hold,
-// regardless of frame-phase offset -- see "Review round 42").
-//
-// `preexistingMs` is an *absolute* quantity -- gantryRemainingMs()'s own
-// return value, measured from "now" across the whole gantry -- but a
-// resource picked up more than once (every lid in this project's own
-// demos: capped, then re-seated onto the ODTC, then off again, then
-// uncapped -- see pcr_setup_demo.py's own docstring) already has some of
-// its own backlog still queued on `cp` from its *previous* pickup, which
-// will elapse for free while this hold plays, in parallel with the rest
-// of the gantry -- not sequentially, on top of it. Enqueuing the raw
-// absolute `preexistingMs` on top of that unrelated, already-queued
-// backlog double counts the overlap: this resource wouldn't actually
-// finish its *new* hold until `cp`'s own prior backlog *plus*
-// `preexistingMs`, when the gantry it's meant to be waiting for finishes
-// at `preexistingMs` alone (confirmed live: a standalone replay of this
-// project's own captured pcr_setup_demo.py event stream through the real
-// frontend modules showed the lid's own redundant re-seat onto the
-// thermocycler not starting to travel until simulated t=95.6s, when the
-// channels it was supposedly waiting for finished at t=49.3s -- the
-// missing ~46s exactly matches `cp`'s own prior, already-in-flight
-// backlog from the preceding cap operation, added a second time on top).
-// Subtracting `cp`'s own current remainingMs converts the absolute
-// quantity into the actual remaining deficit -- 0 whenever this
-// resource's own queue already outlasts the rest of the gantry (the
-// common case for a resource with a long journey of its own already
-// queued), and only the genuine shortfall otherwise.
-function holdCarriedPlate(resourceName, preexistingMs, stops) {
-  const cp = carriedPlates.get(resourceName);
-  if (!cp) return;
-  const holdMs = Math.max(0, preexistingMs - cp.motion.remainingMs);
-  if (holdMs > 0) {
-    cp.enqueue({ x: null, y: null, z: null }, holdMs);
-  }
-  for (let i = 0; i < stops; i++) {
-    cp.enqueue({ x: null, y: null, z: null }, scaled(RISE_MS));
-    cp.enqueue({ x: null, y: null, z: null }, scaled(X_MOVE_MS));
-    cp.enqueue({ x: null, y: null, z: null }, scaled(Y_MOVE_MS));
-    cp.enqueue({ x: null, y: null, z: null }, scaled(DESCEND_MS));
-  }
 }
 
 // Makes `entry`'s own animQueue (a thermocycler's lid-slide/shimmer --
 // see thermocycler.js's queueLidAnimation()/queueThermocyclerShimmer(),
-// the only callers) wait for the rest of the gantry to finish whatever
-// it's currently doing before its *next* enqueued task (the real
-// animation the caller is about to queue right after this) starts
-// playing -- see gantryRemainingMs()'s own docstring for the race this
-// closes. A single combined wait task, not leg-matched the way
-// holdCarriedPlate()'s own stop(s) are (see that function's own
-// docstring for why that distinction matters there): a thermocycler
-// animation was never structurally related to any channel's own leg
-// boundaries in the first place, so there's nothing to frame-match
-// against here, just a real quantity of time to sit out. Harmless to
-// call unconditionally, even when nothing's actually in flight elsewhere
-// (gantryRemainingMs() returning 0 -- the common case once the gantry's
-// caught up -- costs at most one extra render frame; see remainingMs()'s
-// own docstring for why AnimationQueue never divides by zero here).
+// the only callers) wait for the gantry to finish whatever it's currently
+// doing before its *next* enqueued task (the real animation the caller is
+// about to queue right after this) starts playing -- see
+// gantryRemainingMs()'s own docstring for the race this closes. A live
+// condition (see AnimationQueue's own `waitUntil` task type), not a
+// precomputed duration: the old version of this function snapshotted
+// gantryRemainingMs() once and enqueued a fixed-duration hold sized to
+// it, which -- see docs/PLAN.md's "Review round 44"/"45" -- had to be
+// recomputed exactly right and couldn't react if more work got added to
+// the gantry after the snapshot was taken. A live condition can't be
+// wrong this way: it simply doesn't complete until the gantry actually
+// has caught up, however long that turns out to take. Harmless to call
+// unconditionally, even when the gantry's already caught up (the common
+// case) -- an always-true condition completes on its very next tick, no
+// different in practice from not waiting at all.
 function waitForGantry(entry) {
-  const ms = gantryRemainingMs();
-  if (ms > 0) entry.animQueue.enqueue({ duration: ms, onTick: () => {} });
+  entry.animQueue.enqueue({ waitUntil: () => gantryRemainingMs() === 0 });
 }
 
 export function handleOpEvent(msg) {
@@ -1339,58 +1271,6 @@ export function handleOpEvent(msg) {
     }
     case "core_pick_up_resource": {
       const { back_channel: back, front_channel: front, needs_attach, pad_x, pad_y, pad_z } = msg;
-      // Reparented and wrapped in a CarriedPlate *synchronously* here, not
-      // deferred to any channel's own onArrive -- a real websocket "op"
-      // message for the very next leg of this same move (a
-      // core_move_picked_up_resource, or -- the common case, since
-      // move_resource() only calls move_picked_up_resource for explicit
-      // intermediate_locations -- straight to core_drop_resource) routinely
-      // arrives and gets handled well before this pickup's own approach
-      // animation actually finishes (the backend has no reason to wait
-      // between them -- see e.g. core_gripper_demo.py's own back-to-back
-      // move_plate() calls), and that next event's own
-      // animateCarriedPlateTo() call needs this resource's own entry in
-      // `carriedPlates` to already exist to enqueue onto (confirmed live:
-      // deferring this to onArrive left it missing when the very next
-      // op's handler ran, silently dropping its motion legs -- the
-      // resource visibly never moved). Reparenting this early causes no
-      // visible jump either way: `.attach()` preserves world position
-      // exactly, and nothing enqueues any motion onto a freshly-created
-      // CarriedPlate until a *later* op actually calls
-      // animateCarriedPlateTo(), so it just keeps rendering at this same
-      // point throughout the channels' own approach, identical to how it
-      // looked before being reparented.
-      const entry = resourceIndex.get(msg.resource);
-      if (entry) {
-        gantryGroup.attach(entry.group);
-        // Reuses this resource's own existing CarriedPlate if this isn't
-        // its first pickup this session -- see carriedPlates' own
-        // docstring for why every resource gets its *own* persistent
-        // entry (keyed by name) rather than one shared slot: a single
-        // shared slot, replaced on every pickup regardless of *which*
-        // resource, discarded whatever motion legs a *different*
-        // resource's own drop had just enqueued but hadn't finished
-        // playing yet -- routine whenever the gripper moves on to a
-        // second resource before the first one's own journey has had
-        // time to visually finish (the same "no reason for the backend
-        // to wait" timing this whole case's own comment already
-        // describes) -- and re-seeding a *fresh* MotionUnit for that
-        // *first* resource, straight from its own already-stale
-        // msg.x/y/z, the instant something eventually ticked it again
-        // (a later, unrelated pickup for it) caused exactly the same
-        // instant, visible snap "Review round 42"'s own teleport fix
-        // already solved for the *same*-resource case.
-        if (!carriedPlates.has(msg.resource)) {
-          carriedPlates.set(msg.resource, new CarriedPlate(msg.resource, { x: msg.x, y: msg.y, z: msg.z }));
-        }
-      }
-      // Measured *before* this pickup's own legs are enqueued below --
-      // see gantryRemainingMs()'s and holdCarriedPlate()'s own docstrings
-      // for why the plate needs to know about this at all (a preceding,
-      // entirely unrelated op -- e.g. a reagent fill that happened to use
-      // the same two channels a CoRe-gripper pickup defaults to -- could
-      // have left plenty of its own animation still queued on them).
-      const preexistingMs = gantryRemainingMs();
       // Pads aren't already on these channels -- a real prior leg (see
       // STAR_backend.py's own `if self.core_parked: await self.
       // pick_up_core_gripper_tools(...)`): travel to core_grippers first,
@@ -1401,28 +1281,27 @@ export function handleOpEvent(msg) {
       // visualizer_backend.py's own `_core_grippers_point()`) falls back
       // to the old instant toggle instead of skipping the pad glyph
       // entirely.
-      let stopsBeforeGrip = 0;
       if (needs_attach) {
         if (pad_x != null) {
           const pad = padTargets(back, front, pad_y, pad_z);
           animateGripperStop(pad_x, pad.targetYFor, pad.targetZFor, front, () => setGripperPadChannels(back, front));
-          stopsBeforeGrip = 1;
         } else {
           setGripperPadChannels(back, front);
         }
       }
       const grip = gripResourceTargets(back, front, msg.y, msg.z);
-      animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
-      // The plate itself doesn't move during this pickup (it's not
-      // "grabbed" until the channels have actually risen, traveled, and
-      // descended onto it -- the grip stop just enqueued above) -- but it
-      // *has* already been reparented and wrapped in a CarriedPlate this
-      // same handler, so without holding it here, whatever real travel
-      // legs a *later* core_move_picked_up_resource/core_drop_resource
-      // event enqueues would start playing immediately when that event's
-      // handler runs, not once the channels actually finish this pickup's
-      // own approach -- see holdCarriedPlate()'s own comment.
-      holdCarriedPlate(msg.resource, preexistingMs, stopsBeforeGrip + 1);
+      // Attached exactly when this grip-descend leg completes -- not
+      // before (the resource shouldn't visually move until the channels
+      // have actually risen, traveled, and descended onto it) and not via
+      // any separate queue that then has to be kept in lockstep with this
+      // one by hand (see attachResourceTo()'s own docstring). No waiting
+      // needed for whatever backlog the gantry already had queued before
+      // this pickup's own legs, either -- they're appended to the *same*
+      // channels' own FIFO queues, so they already play only after
+      // anything already there, for free.
+      animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front, () => {
+        attachResourceTo(msg.resource, { x: msg.x, y: msg.y, z: msg.z }, channels[front]?.group);
+      });
       logEvent("core_pick_up_resource", msg.resource ?? "");
       break;
     }
@@ -1430,62 +1309,71 @@ export function handleOpEvent(msg) {
       const { back_channel: back, front_channel: front } = msg;
       const grip = gripResourceTargets(back, front, msg.y, msg.z);
       animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
-      animateCarriedPlateTo(msg.resource, msg.x, msg.y, msg.z);
+      // No separate call needed for the resource itself: it's attached
+      // under channels[front].group (see core_pick_up_resource's own grip
+      // onArrive above) and inherits this same motion automatically, via
+      // ordinary THREE.js transform propagation.
       logEvent("core_move_picked_up_resource", msg.resource ?? "");
       break;
     }
     case "core_drop_resource": {
       const { back_channel: back, front_channel: front, return_core_gripper, pad_x, pad_y, pad_z } = msg;
       const grip = gripResourceTargets(back, front, msg.y, msg.z);
-      animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
-      // Enqueued while this resource's own CarriedPlate entry still
-      // exists in `carriedPlates` -- must run before the reparent below.
-      animateCarriedPlateTo(msg.resource, msg.x, msg.y, msg.z);
-      // Reparented back under the plain scene root synchronously here, not
-      // deferred to an onArrive -- same "the very next op can arrive and
-      // run its own handler well before this one's ~1.1s descend animation
-      // actually finishes" race core_pick_up_resource's own comment
-      // describes (confirmed live: a deferred version here stomped on a
-      // *second* pickup that had already started by the time this drop's
-      // onArrive eventually fired, wiping out its CarriedPlate mid-flight).
-      // Reparenting early causes no visual jump: CarriedPlate.
-      // applyPosition() always sets an absolute deck position regardless
-      // of which (transform-less) parent the group currently sits under,
-      // and the queued motion legs enqueued just above still play out
-      // over their own real duration either way. Not into whatever THREE
-      // group actually corresponds to the resource's new real PyLabRobot
-      // parent (a carrier site's holder, a thermocycler's payload group,
-      // etc.) -- this project's scene tree only ever gets rebuilt
-      // wholesale from a fresh "scene" message (see scene-builder.js's
-      // loadScene()), so there's no lighter-weight way to re-nest it
-      // correctly short of that, and a flat sceneRoot child renders
-      // identically either way (position is already absolute deck mm via
-      // mapPoint()). Per user direction ("reparent the real plate mesh").
       const entry = resourceIndex.get(msg.resource);
-      if (entry && sceneRoot) sceneRoot.attach(entry.group);
-      // Deliberately *not* removed from `carriedPlates` here: the legs
-      // just enqueued above haven't played out yet (they take their own
-      // ~1.1s of real ticking, via updateCarriedPlate() -- see that
-      // function's own comment), and deleting this resource's own entry
-      // synchronously would orphan them mid-queue, from the only thing
-      // that ever calls `.update()` on them -- confirmed live: the
-      // resource visibly never reached its drop destination, frozen at
-      // wherever it was when this handler ran, exactly the "silently
-      // dropped legs" bug the pickup side's own comment above describes,
-      // just for the opposite reason (too eager to clear the entry,
-      // instead of too slow to create it). Safe to just leave it: once
-      // its queue drains, an idle AnimationQueue.update() is a no-op (see
-      // that class's own early-return), and a later core_pick_up_resource
-      // for this same resource reuses it (see that case's own comment) --
-      // nothing ever reads a stale, fully-drained entry as if it were
-      // still actively gripped.
+      // Released -- reparented back out from under the gripping channel
+      // -- exactly when this descend leg completes, not before: doing it
+      // any earlier (this project's *previous* design reparented
+      // synchronously here, at handler-run time, back when a carried
+      // resource's position was independently tweened rather than
+      // inherited -- see attachResourceTo()'s own docstring) would
+      // visibly strand the resource mid-descend, no longer following the
+      // channel that's still finishing lowering it.
+      //
+      // Reparents to sceneRoot by default, or to the *next* entry of
+      // entry.pendingParents' own group if a "resource_reparented" event
+      // (see that case below) has already told us this resource is
+      // landing seated on another one (e.g. a lid capped onto a plate).
+      // That event is a real PyLabRobot resource-tree signal, sent the
+      // moment the backend's own `assign_child_resource()` call actually
+      // runs -- which, per this whole project's "no realtime delay from a
+      // sleep-free backend" design, happens essentially instantly
+      // relative to real animation playback -- so by the time *this*
+      // callback fires, after this leg's own real, scaled DESCEND_MS has
+      // genuinely played out, entry.pendingParents already has an entry
+      // for this drop, however long ago (in real event-processing terms)
+      // it arrived.
+      //
+      // A FIFO queue, not a single mutable field: every op event for the
+      // *entire* run arrives essentially all at once, well before any of
+      // them actually finishes playing (this same "events arrive
+      // instantly, animation takes real time" gap is why this whole
+      // mechanism exists at all -- see gantryRemainingMs()'s own
+      // docstring). A resource picked up and dropped more than once in
+      // one run (every lid in this project's own demos: capped, then
+      // uncapped -- see pcr_setup_demo.py) gets *all* of its own
+      // resource_reparented events queued up before *any* of its drops'
+      // own onArrive callbacks have fired -- confirmed live: a single
+      // mutable `entry.pendingParent` field ended up holding whichever
+      // one arrived *last* (the uncap's own, landing back on a plain
+      // carrier slot -- correctly `null`) by the time the *first* drop's
+      // (the cap's) own onArrive actually ran, silently discarding the
+      // "seat it on the plate" decision that drop was supposed to apply,
+      // and leaving the lid parented under sceneRoot instead -- exactly
+      // why the lid never visibly rode along with the plate's own later
+      // moves despite pcr_setup_demo.py no longer sending any lid-specific
+      // event for them at all. Queueing and shifting one entry per drop
+      // matches each drop to the correct one in order instead.
+      animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front, () => {
+        const parentName = entry?.pendingParents?.shift() ?? null;
+        const parentEntry = parentName ? resourceIndex.get(parentName) : null;
+        attachResourceTo(msg.resource, { x: msg.x, y: msg.y, z: msg.z }, parentEntry?.group ?? sceneRoot);
+      });
       if (return_core_gripper) {
-        // Trailing, channels-only stop (the plate has already been
-        // released above -- animateCarriedPlateTo() isn't called again):
-        // travel back to core_grippers and "return" the pads once actually
-        // there, mirroring the pickup side's own pad-attach travel. Same
-        // "no pad_x, no coordinates to travel to" fallback as the pickup
-        // side.
+        // Trailing, channels-only stop (the resource has already been
+        // released above): travel back to core_grippers and "return" the
+        // pads once actually there, mirroring the pickup side's own
+        // pad-attach travel. Same "no pad_x, no coordinates to travel to"
+        // fallback as the pickup side.
         if (pad_x != null) {
           const pad = padTargets(back, front, pad_y, pad_z);
           animateGripperStop(pad_x, pad.targetYFor, pad.targetZFor, front, () => setGripperPadChannels(null, null));
@@ -1494,6 +1382,34 @@ export function handleOpEvent(msg) {
         }
       }
       logEvent("core_drop_resource", msg.resource ?? "");
+      break;
+    }
+    // A real PyLabRobot resource-tree change (Resource.
+    // register_did_assign_resource_callback(), see visualizer_backend.py's
+    // own _register_reparent_callbacks()) -- fired the moment a resource's
+    // *real* parent changes, independent of and in addition to whatever
+    // core_drop_resource event caused it. Doesn't reparent anything
+    // itself (this event carries no x/y/z -- see that Python-side
+    // function's own docstring for why): just queues the decision for
+    // core_drop_resource's own release callback (above) to dequeue and
+    // apply, one entry per drop, once that resource's own drop animation
+    // has actually finished playing -- see that callback's own docstring
+    // for why this has to be a queue, not a single mutable field. Every
+    // reparent this project's CoRe-gripper feature set produces is
+    // immediately preceded by a real core_drop_resource op for the same
+    // resource (pick_up_resource() never touches PyLabRobot's own
+    // resource.parent -- confirmed by reading liquid_handler.py -- only
+    // drop_resource() does), so the two queues -- this project's own
+    // per-resource core_drop_resource events, and PyLabRobot's own
+    // per-resource reparent events -- always stay the same length and in
+    // the same relative order, keeping the pairing correct.
+    case "resource_reparented": {
+      const entry = resourceIndex.get(msg.resource);
+      if (!entry) break;
+      const parentEntry = msg.parent ? resourceIndex.get(msg.parent) : null;
+      const attachable = parentEntry && !isFixedInstallation(parentEntry.node.category);
+      entry.pendingParents ??= [];
+      entry.pendingParents.push(attachable ? msg.parent : null);
       break;
     }
     default:

@@ -188,6 +188,7 @@ class VisualizerBackend(LiquidHandlerBackend):
     await self._inner.setup()
     self.setup_finished = True
     self._register_state_callbacks(self.deck)
+    self._register_reparent_callbacks(self.deck)
     await self._server.set_scene(build_scene(self.deck), num_channels=self.num_channels)
     await self._broadcast_initial_state(self.deck)
 
@@ -267,6 +268,65 @@ class VisualizerBackend(LiquidHandlerBackend):
       resource.register_state_update_callback(make_callback(resource.name))
     for child in resource.children:
       self._register_state_callbacks(child)
+
+  def _register_reparent_callbacks(self, root) -> None:
+    """Subscribe once, on ``root`` (always ``self.deck``), to real
+    PyLabRobot resource-tree changes anywhere in its subtree -- a
+    resource's own ``.parent`` actually changing -- independent of, and in
+    addition to, whatever ``core_pick_up_resource``/``core_drop_resource``
+    op event caused it.
+
+    Lets the frontend know when e.g. a lid has been *seated* on a plate
+    (not just gripped and released somewhere), so it can keep that lid
+    visually riding along on every future move the plate makes, with no
+    further lid-specific event needed at all -- see gantry.js's own
+    ``attachResourceTo()``/``"resource_reparented"`` handling, and
+    ``examples/pcr_setup_demo.py``'s own docstring for the workaround this
+    replaces (a redundant, otherwise-pointless extra ``move_lid()`` call
+    right after every capped-plate move, purely to give the frontend an
+    event to animate the lid with).
+
+    Deliberately **not** recursive the way ``_register_state_callbacks()``
+    is: ``Resource.assign_child_resource()`` already registers its own
+    "did assign" callback *on the newly-assigned child* purely to
+    propagate the event up to its parent's own callbacks (see that
+    method's own "so that they can be propagated up the tree" comment),
+    all the way to whatever this is registered on -- so a single
+    registration on the root already observes every assignment anywhere
+    in the tree beneath it, called with the actual (possibly deeply
+    nested) resource that was assigned, not some intermediate ancestor.
+    Registering on every node individually, the way the state-callback
+    method above does, would make each assignment fire once per ancestor
+    level between the root and where it happened, via that same
+    propagation chain -- confirmed by reading ``assign_child_resource()``'s
+    own source, not by trial and error.
+
+    ``Resource.assign_child_resource()`` also sets ``resource.parent =
+    self`` *before* firing every registered ``did_assign_resource_
+    callback`` (see ``pylabrobot.resources.resource``), so by the time
+    this fires, ``resource.parent`` already reflects the real, final
+    parent -- no separate "will assign" step needed to catch the *old*
+    one, since a resource being reassigned is automatically unassigned
+    from its old parent first, inside that same call.
+
+    Registered once, here, alongside ``_register_state_callbacks()`` --
+    so, same as that method, this only observes reparents caused by the
+    *protocol's own* runtime operations (move_lid/move_plate/etc.), not
+    the demo script's own initial deck construction, which has already
+    finished by the time ``setup()`` gets here.
+    """
+
+    def _on_assigned(child) -> None:
+      self._server.schedule_broadcast(
+        {
+          "type": "op",
+          "op": "resource_reparented",
+          "resource": child.name,
+          "parent": child.parent.name if child.parent else None,
+        }
+      )
+
+    root.register_did_assign_resource_callback(_on_assigned)
 
   async def _broadcast_initial_state(self, resource) -> None:
     """Send each resource's *current* state once at startup, not just future
