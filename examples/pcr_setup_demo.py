@@ -49,9 +49,13 @@ version of this script issued a second, otherwise-redundant
 those two plate moves purely to give the frontend *some* event to animate
 the lid with -- no longer needed now that the frontend derives this
 relationship from the real resource tree instead.
-``return_core_gripper=False`` on every leg of a capped-plate move except
-the very last keeps the same two channels attached across both calls,
-rather than returning and re-attaching the pads in between for no reason.
+``return_core_gripper=False`` on steps 2 and 5 (the cap, and the unload)
+keeps the same two channels attached into whichever CoRe-gripper move
+immediately follows each of them (loading onto the ODTC, and the uncap,
+respectively) instead of pointlessly returning and re-attaching the pads
+in between. Step 3's own plate move (onto the ODTC) leaves it at
+PyLabRobot's own default (``True``) since the *next* op after it --
+closing the door -- doesn't use the gripper at all.
 
 Run it with:
 
@@ -197,7 +201,7 @@ async def main() -> None:
 
     # -- 2. Cap: lid moves from its own site onto the plate ----------------
     print("Capping the plate with its lid...")
-    await lh.move_lid(lid, pcr_plate, use_arm="core")
+    await lh.move_lid(lid, pcr_plate, use_arm="core", return_core_gripper=False)
 
     # -- 3. Load: open the ODTC's door, then move the capped plate on ------
     print("Opening the thermocycler's lid to receive the plate...")
@@ -218,7 +222,7 @@ async def main() -> None:
     await tc.open_lid()
 
     print("Moving the capped plate back to its carrier site...")
-    await lh.move_plate(pcr_plate, plate_carrier[0], use_arm="core")
+    await lh.move_plate(pcr_plate, plate_carrier[0], use_arm="core", return_core_gripper=False)
 
     # -- 6. Uncap: lid moves back to its own original site -------------------
     print("Moving the lid back to its own site...")
