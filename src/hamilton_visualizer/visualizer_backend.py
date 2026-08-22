@@ -15,10 +15,12 @@ identically whether ``inner`` talks to real hardware or not.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+import types
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from pylabrobot.liquid_handling.backends.backend import LiquidHandlerBackend
 from pylabrobot.liquid_handling.backends.chatterbox import LiquidHandlerChatterboxBackend
+from pylabrobot.liquid_handling.liquid_handler import LiquidHandler
 from pylabrobot.liquid_handling.standard import (
   Drop,
   DropTipRack,
@@ -34,7 +36,7 @@ from pylabrobot.liquid_handling.standard import (
   SingleChannelAspiration,
   SingleChannelDispense,
 )
-from pylabrobot.resources import Deck, Tip, TipRack, set_tip_tracking, set_volume_tracking
+from pylabrobot.resources import Deck, Resource, Tip, TipRack, set_tip_tracking, set_volume_tracking
 from pylabrobot.resources.tip_tracker import TipTracker
 
 from hamilton_visualizer.events import (
@@ -458,6 +460,15 @@ class VisualizerBackend(LiquidHandlerBackend):
     event = resource_event("aspirate96", resource, offset=aspiration.offset, volume=aspiration.volume)
     if isinstance(aspiration, MultiHeadAspirationPlate):
       event["wells"] = _well_volume_entries(aspiration.wells)
+    # `aspiration.mix` is threaded straight through from `lh.aspirate96(...,
+    # mix=Mix(...))` -- see events.py's channel_ops_event() for the same
+    # field on the per-channel side. Only `repetitions` matters to the
+    # frontend's cycling animation (gantry.js caps it visually anyway, the
+    # same "reads as active, not literally N repeats" reasoning
+    # thermocycler.js's own shimmer already uses) -- `volume`/`flow_rate`
+    # aren't surfaced since nothing renders them differently.
+    if aspiration.mix is not None:
+      event["mix_repetitions"] = aspiration.mix.repetitions
     await self._server.broadcast(event)
 
   async def dispense96(
@@ -472,6 +483,9 @@ class VisualizerBackend(LiquidHandlerBackend):
     event = resource_event("dispense96", resource, offset=dispense.offset, volume=dispense.volume)
     if isinstance(dispense, MultiHeadDispensePlate):
       event["wells"] = _well_volume_entries(dispense.wells)
+    # See aspirate96()'s own comment just above for why only `repetitions`.
+    if dispense.mix is not None:
+      event["mix_repetitions"] = dispense.mix.repetitions
     await self._server.broadcast(event)
 
   def _core_grippers_point(self) -> Optional[Dict[str, float]]:
@@ -637,6 +651,36 @@ class VisualizerBackend(LiquidHandlerBackend):
         event["pad_x"], event["pad_y"], event["pad_z"] = pad_point["x"], pad_point["y"], pad_point["z"]
     await self._server.broadcast(event)
 
+  # -- incubation holds -------------------------------------------------------
+  # Not part of the standard LiquidHandlerBackend interface at all -- there's
+  # no real hardware primitive a generic "just wait" maps to the way
+  # pick_up_tips/aspirate/etc. do, so this is a visualizer-only extra method
+  # (same idea as broadcast_state() above), called via lh.sleep() -- see
+  # attach_sleep() below -- rather than through self._inner. Deliberately
+  # does *not* call self._inner.anything: an incubation hold has no backend
+  # call to forward in the first place, unlike every other method in this
+  # class, which all wrap a real LiquidHandlerBackend primitive.
+  #
+  # Mirrors ThermocyclerBackend.run_protocol()'s own "animation timing is
+  # decoupled from backend timing" philosophy (see thermocycler_backend.py's
+  # module docstring): the *real* number of minutes a protocol calls for
+  # here is broadcast for the tooltip/log, but the frontend always renders
+  # one fixed-length cosmetic animation regardless (frontend/incubate.js) --
+  # this is what lets a demo script write `await lh.sleep(1800, pcr_plate)`
+  # for a real 30-minute ethanol wash without the run actually taking 30
+  # minutes (or even the 1800 * duration_scale seconds a literal
+  # asyncio.sleep(1800) tied into this project's own playback-speed HUD
+  # control would still take).
+  async def incubate(self, seconds: float, resources: Sequence[Resource]) -> None:
+    await self._server.broadcast(
+      {
+        "type": "op",
+        "op": "incubate",
+        "resources": [r.name for r in resources],
+        "duration_s": seconds,
+      }
+    )
+
   # -- misc passthroughs ----------------------------------------------------
   async def request_tip_presence(self):
     return await self._inner.request_tip_presence()
@@ -661,3 +705,42 @@ class VisualizerBackend(LiquidHandlerBackend):
   async def move_channel_z(self, channel: int, z: float) -> None:
     await self._inner.move_channel_z(channel, z)
     await self._server.broadcast({"type": "op", "op": "move_channel", "channel": channel, "axis": "z", "value": z})
+
+
+def attach_sleep(lh: LiquidHandler) -> None:
+  """Monkey-patches ``lh.sleep(seconds, resource=None)`` onto this specific
+  ``LiquidHandler`` instance -- a protocol-script-facing wrapper around
+  ``VisualizerBackend.incubate()`` (see that method's own docstring for why
+  this exists instead of ``await asyncio.sleep(seconds)``).
+
+  Per user direction: mirrors every other ``lh.X(...)`` call's own style
+  (``await lh.sleep(300, pcr_plate)``, reading exactly like ``await
+  lh.aspirate(...)`` does) rather than requiring a protocol script to
+  separately track and call the underlying ``backend`` object by name.
+
+  Instance-level, not a ``LiquidHandler`` class-level patch (unlike
+  ``_patch_chatterbox_resource_kwargs()`` above, which patches
+  ``LiquidHandlerChatterboxBackend`` itself once at import time): this
+  function only has ``lh`` to work with in the first place -- a
+  ``VisualizerBackend`` has no back-reference to the ``LiquidHandler``
+  wrapping it, only the reverse (``lh.backend``) -- and patching the class
+  itself would silently make ``.sleep()`` "work" (raising ``AttributeError``
+  on ``self.backend.incubate``) even for an ``lh`` never actually wired to a
+  ``VisualizerBackend``, which is worse than just not existing there at all.
+  Call once, right after constructing ``lh``.
+
+  ``resource`` accepts a single ``Resource``, a list of them, or ``None``
+  (no resource highlighted -- the frontend still plays the fixed hold
+  animation, just with nothing specific to pulse).
+  """
+
+  async def _sleep(self: LiquidHandler, seconds: float, resource=None) -> None:
+    if resource is None:
+      resources: List[Resource] = []
+    elif isinstance(resource, list):
+      resources = resource
+    else:
+      resources = [resource]
+    await self.backend.incubate(seconds, resources)
+
+  lh.sleep = types.MethodType(_sleep, lh)  # type: ignore[attr-defined]

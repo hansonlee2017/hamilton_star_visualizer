@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from pylabrobot.resources import Deck, TipRack
+from pylabrobot.resources import Coordinate, Deck, TipRack
 from pylabrobot.resources.tip import Tip
 from pylabrobot.serializer import serialize
 
@@ -82,11 +82,36 @@ def _inject_child_location(resource: Any, node: Dict[str, Any]) -> None:
   which has no such placeholder child node) doesn't have this problem,
   which is why this needed its own dedicated field instead of already
   being covered by the existing ``node.children`` scan.
+
+  ``PlateAdapter`` (e.g. an Alpaqua magnetic rack -- see
+  ``examples/spri_cleanup_demo.py``) has the exact same empty-at-scene-
+  build-time gap but isn't a ``ResourceHolder`` at all, so it has no
+  ``child_location`` attribute to duck-type here -- its own equivalent is
+  called ``dz`` instead (see ``plate_adapter.py``'s own docstring: "the
+  outside-bottom of a well"). Handled as a fallback below, synthesizing an
+  equivalent ``child_location``-shaped field from it.
   """
 
   child_location = getattr(resource, "child_location", None)
   if child_location is not None:
     node["child_location"] = serialize(child_location)
+  else:
+    # PlateAdapter (e.g. an Alpaqua magnetic rack -- see
+    # examples/spri_cleanup_demo.py) has the exact same "payload seat
+    # height" gap a ResourceHolder does when empty at scene-build time
+    # (its own child, if any, is a plain Plate, so `resource.children`
+    # would cover an *occupied* one -- see the docstring above -- but
+    # there's no `resource.children` entry yet for an empty one either),
+    # just under a different attribute name (`dz`, the "outside-bottom of
+    # a well" offset -- see plate_adapter.py's own __init__ docstring) --
+    # not a ResourceHolder subclass at all, so `child_location` itself
+    # doesn't exist on it. `scene-builder.js`'s carrier-height math only
+    # ever reads `child_location.z` (see that file's own `buildResource
+    # Object()`), so only `z` needs to be real here; `x`/`y` are unused
+    # padding to keep the same shape `serialize(Coordinate)` produces.
+    dz = getattr(resource, "dz", None)
+    if dz is not None:
+      node["child_location"] = serialize(Coordinate(x=0.0, y=0.0, z=dz))
 
   for child_resource, child_node in zip(resource.children, node.get("children") or []):
     _inject_child_location(child_resource, child_node)

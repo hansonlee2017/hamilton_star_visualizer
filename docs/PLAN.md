@@ -4112,6 +4112,134 @@ operations/animations?"
       resource's own `animQueue.isIdle` -- mirroring `isEverythingIdle()`
       itself exactly, in both replay scripts.
 
+## Review round 51
+
+User request: a brand-new 13-step SPRI (solid-phase reversible
+immobilization) bead cleanup protocol, run against a PCR plate on an
+Alpaqua magnetic plate adapter. Three things new to this project, all
+first exercised here (planned in full via plan mode first, including
+clarifying questions on tip strategy, which steps get `Mix`, and
+incubation-timing policy -- see this session's plan-mode transcript):
+
+- [x] **`lh.sleep()` -- incubation holds that never literally block the
+      demo.** New `VisualizerBackend.incubate(seconds, resources)`
+      (`visualizer_backend.py`) -- not part of the standard
+      `LiquidHandlerBackend` interface at all (no real hardware primitive
+      "just wait" maps to), broadcasts an `"incubate"` op event and
+      returns immediately. New `attach_sleep(lh)` helper, exported from
+      `hamilton_visualizer`, monkey-patches `lh.sleep(seconds, resource)`
+      onto one specific `LiquidHandler` instance (has to be instance-level,
+      not a class patch like `_patch_chatterbox_resource_kwargs()`: a
+      `VisualizerBackend` has no back-reference to the `LiquidHandler`
+      wrapping it, only the reverse). New `frontend/incubate.js`
+      (`queueIncubateAnimation()`), modeled directly on
+      `thermocycler.js`'s `queueThermocyclerShimmer()`: one fixed 2500ms
+      cool-teal pulse on `entry.animQueue`, regardless of the real
+      `duration_s` -- same "animation timing is decoupled from backend
+      timing" precedent `ThermocyclerBackend.run_protocol()`'s own fixed
+      5s shimmer already established. New `"incubate"` case in
+      `gantry.js`'s `dispatchOp()`. Needed **zero bridging code** to make
+      this correctly block whatever op comes next -- the Round 50 global
+      linear op queue already treats every resource's own `animQueue` as
+      part of `isEverythingIdle()`, so an "incubate" op is just another
+      entry in `pendingOps` like any other.
+- [x] **Mix-cycle animation.** `pylabrobot.liquid_handling.standard.Mix`
+      was already threaded through every aspirate/dispense/aspirate96/
+      dispense96 op object, just never read. `events.py`'s
+      `channel_ops_event()` and `VisualizerBackend.aspirate96()`/
+      `dispense96()` now embed `mix_repetitions` when `op.mix`/
+      `aspiration.mix` is set. `gantry.js`'s `animateChannelOp()`/
+      `animateCore96Op()` replace the single static `HOLD_MS` leg with up
+      to `MAX_MIX_CYCLES` (3) alternating `flowPulse(+1)`/`flowPulse(-1)`
+      legs when present -- same "a handful of oscillations reads as
+      actively happening, not a literal N-repeat playback" precedent
+      `queueThermocyclerShimmer()` already established for a real
+      protocol's own cycle count.
+- [x] **Alpaqua magnetic plate adapter.** `PlateAdapter`
+      (`pylabrobot.resources.plate_adapter`) turned out to need *zero*
+      PyLabRobot-side plumbing -- `LiquidHandler.drop_resource()` already
+      has a dedicated branch for it, so `lh.move_plate(plate, alpaqua_rack,
+      use_arm="core")` works exactly like moving onto the thermocycler
+      does. Two real gaps found and fixed: (1) `"plate_adapter"` (its
+      default category) wasn't in `categories.js`'s `CARRIER_CATEGORIES`/
+      `CATEGORY_COLORS` -- added, which also makes `gantry.js`'s
+      `isFixedInstallation()` correctly treat it as non-attachable (it
+      never moves, so nothing seated on it should ride along with it if it
+      somehow did). (2) `scene.py`'s `_inject_child_location()` only
+      duck-typed `child_location` (a `ResourceHolder`-only attribute,
+      already added for the thermocycler in "Review round 32"-ish) --
+      `PlateAdapter` exposes the exact same "payload seat height while
+      still empty" information under a different name (`dz`), so an
+      Alpaqua rack with nothing on it yet at scene-build time rendered as
+      a wrong, thin ~10mm slab instead of its real ~27.5mm payload height.
+      Fixed by duck-typing `dz` too and synthesizing an equivalent
+      `child_location`-shaped field from it -- the exact same bug class as
+      the thermocycler's own empty-at-scene-build-time gap, just under a
+      different attribute name. User flagged mid-implementation that a
+      real Alpaqua rack's magnet posts sit *between* the wells and should
+      only raise the plate "a little bit" -- confirmed live (see
+      Verification below) this is exactly what happens: 27.5mm is
+      PyLabRobot's own real, published `dz` value for this exact hardware
+      model (`alpaqua_96_plateadapter_magnum_flx`), not a number this
+      project invented, and reads as comparatively modest against this
+      deck's own scale (the thermocycler alone is 124mm tall).
+- [x] **Reservoir shape matters for the 96 head, per user correction.**
+      `aspirate96`/`dispense96` need a container wide enough for the
+      96-head's full-plate footprint to reach into everywhere at once -- a
+      narrow `Trough_CAR`-mounted trough (`hamilton_1_trough_60mL_Vb`,
+      every other demo's own reservoir shape) is real-hardware too narrow,
+      only reachable by 8-channel pipettes. `nest_1_troughplate_
+      195000uL_Vb` (`pylabrobot.resources.nest`) is PyLabRobot's real
+      full-SBS-footprint counterpart -- "96 tiny holes, but one container"
+      per its own docstring, a genuine `Plate` (sits on a plate carrier
+      site, not the trough carrier) that `aspirate96`/`dispense96` treat
+      as one shared container. Per user direction: SPRI beads (expensive
+      -- worth a narrow trough's smaller dead volume, worth the
+      8-channel-only tradeoff) keep the plain trough and use 8-channel
+      pipetting for step 1's bind; ethanol and elution buffer (cheap --
+      dead volume doesn't matter, both want 96-head speed) get the
+      troughplate shape.
+- [x] **New `examples/spri_cleanup_demo.py`** -- the 13-step protocol,
+      almost entirely 96-head (`pick_up_tips96`/`aspirate96`/
+      `dispense96`/`discard_tips96`), fresh tips for every one of the 8
+      liquid-handling steps (2 `TIP_CAR_480_A00` carriers, 8 racks), plus
+      `use_arm="core"` plate moves onto/off the Alpaqua rack. A real bug
+      caught immediately by running the protocol's own logic against a
+      real backend before ever touching the frontend: `dispense96` needs
+      the tips to already hold liquid -- an early draft went straight from
+      `pick_up_tips96()` to `dispense96()` for the ethanol/elution add
+      steps with no `aspirate96()` in between, raising a real
+      `TooLittleLiquidError` (0uL in the tips) -- fixed by adding the
+      missing `aspirate96()` call, the same aspirate-then-dispense shape
+      step 1's own 8-channel bead mixing already used correctly.
+- [x] Verified: full protocol logic run against a real `VisualizerServer`/
+      `VisualizerBackend` (no live socket) completes cleanly end to end (67
+      op events, 7 `incubate` calls, 7 96-head tip-uses, 3 plate moves, 3
+      `resource_reparented` events -- reasonable and no volume-tracker
+      errors). This project's own deterministic Node replay technique,
+      against that real captured event stream: (a) the Alpaqua rack
+      renders at its real 27.5mm payload height straight out of
+      `loadScene()`, before any op is ever fed, confirming the scene.py
+      fix doesn't depend on a plate arriving later; (b) every one of the 7
+      `incubate` ops delays the next op's own dispatch by ~151 frames
+      (~2517ms, matching `INCUBATE_MS`) -- a genuine block, not a
+      decorative overlay; (c) a synthetic isolated comparison confirmed a
+      Mix-enabled `dispense96`'s own queued 96-head backlog is exactly
+      900ms longer than the equivalent plain one (1600ms -> 2500ms == -
+      `HOLD_MS` (150) + 3 x `MIX_CYCLE_MS` (350), the exact predicted leg
+      math); (d) all 64 op events dispatch and the run drains to fully
+      idle. Live browser check: confirmed visually (the rack renders as a
+      modestly-sized block, comparable to neighboring plate-carrier items,
+      not an oversized carrier shaft) and numerically via
+      `window.__viz.resourceIndex` -- the plate's landed world Y on the
+      rack is exactly the rack's own base Y + 27.5mm. Full `node --test
+      ./tests/frontend/*.test.js`: 36/36 passing, unchanged (no new
+      dedicated unit test file for `incubate.js`/the mix-cycle legs,
+      matching this project's own established precedent --
+      `thermocycler.js`'s equivalent shimmer/lid animations have never had
+      dedicated unit tests either, only replay-test coverage, since both
+      need a THREE.js material/mesh to animate at all).
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

@@ -17,6 +17,7 @@ import {
 import { TIP_PYRAMID_RADIUS, TIP_PYRAMID_HEIGHT, resourceIndex } from "./scene-builder.js";
 import { applyEmbeddedResourceState } from "./resource-state.js";
 import { queueLidAnimation, queueThermocyclerShimmer } from "./thermocycler.js";
+import { queueIncubateAnimation } from "./incubate.js";
 import { getDurationScale } from "./duration-scale.js";
 import { logEvent } from "./dom.js";
 import { CHANNEL_PITCH_MM, resolveChannelYs, planGantryPasses as planGantryPassesPure } from "./gantry-planning.js";
@@ -403,13 +404,32 @@ export function traverseLegZ(tipHeightMm, refZ, tipLengthFn) {
   };
 }
 
+// A cycling mix (Mix, see pylabrobot.liquid_handling.standard) replaces the
+// single static HOLD_MS leg with a short back-and-forth flowPulse()
+// sequence instead -- same "a handful of oscillations reads as actively
+// happening, not a literal N-repeat playback" philosophy
+// thermocycler.js's own queueThermocyclerShimmer() already established
+// for a real protocol's cycle count. Each mix leg is itself a stationary
+// (no x/y/z change) leg, so it still occupies real time on the channel's
+// own MotionUnit queue -- meaning a mixed aspirate/dispense genuinely
+// keeps `isEverythingIdle()` false, and so genuinely delays whatever op
+// comes next, for exactly as long as the mix visibly plays -- not a
+// decorative overlay layered on top of an unaffected duration the way
+// pulse()/flashResource() are.
+const MIX_CYCLE_MS = 350;
+const MAX_MIX_CYCLES = 3;
+
 // `tipLength`: override for the pick_up_tips case, where the tip that
 // matters for this op's clearance is the one about to be grabbed (from the
 // op event's tip_length_mm), not whatever this channel was last carrying --
 // see events.py's tip_length_mm comment. Every other op omits it and falls
 // back to the channel's own remembered `tipLength` (set by its last
 // pick-up), since it's still carrying that same tip throughout.
-function animateChannelOp(entry, { onArrive, tipLength, traverseHeightMm, endHeightMm } = {}) {
+// `mixRepetitions`: present only for an aspirate/dispense entry whose real
+// PyLabRobot op carried a `Mix` (see events.py's channel_ops_event()) --
+// capped at MAX_MIX_CYCLES regardless of the real value, same reasoning
+// as MIX_CYCLE_MS's own comment above.
+function animateChannelOp(entry, { onArrive, tipLength, traverseHeightMm, endHeightMm, mixRepetitions } = {}) {
   const ch = channels[entry.channel];
   if (!ch) return;
   // `entry.z` (from the server) is where the *tip's point* should end up --
@@ -440,7 +460,15 @@ function animateChannelOp(entry, { onArrive, tipLength, traverseHeightMm, endHei
   // onArrive fires exactly when this leg's tween completes -- see enqueue()'s
   // docstring for why that's not the same as a fixed setTimeout delay.
   ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(DESCEND_MS), onArrive);
-  ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(HOLD_MS));
+  if (mixRepetitions) {
+    const cycles = Math.min(mixRepetitions, MAX_MIX_CYCLES);
+    for (let i = 0; i < cycles; i++) {
+      const direction = i % 2 === 0 ? 1 : -1;
+      ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(MIX_CYCLE_MS), () => ch.flowPulse(direction));
+    }
+  } else {
+    ch.enqueue({ x: entry.x, y: entry.y, z: targetZ }, scaled(HOLD_MS));
+  }
   ch.enqueue({ x: entry.x, y: entry.y, z: retractZ }, scaled(RETRACT_MS));
 }
 
@@ -547,6 +575,10 @@ function animateChannelGroupOp(entries, makeOnArrive, { tipLengthFor, traverseHe
         tipLength: tipLengthFor ? tipLengthFor(entry) : undefined,
         traverseHeightMm,
         endHeightMm,
+        // Embedded directly on the per-channel entry by channel_ops_event()
+        // (events.py) -- see animateChannelOp()'s own mixRepetitions
+        // comment for what this does.
+        mixRepetitions: entry.mix_repetitions,
       });
     }
   }
@@ -819,7 +851,20 @@ function animateCore96Op(msg, onArrive, tipLength) {
   core96Head.enqueue({ x: msg.x, y: null, z: restZ }, scaled(X_MOVE_MS));
   core96Head.enqueue({ x: msg.x, y: msg.y, z: restZ }, scaled(Y_MOVE_MS));
   core96Head.enqueue({ x: msg.x, y: msg.y, z: targetZ }, scaled(DESCEND_MS), onArrive);
-  core96Head.enqueue({ x: msg.x, y: msg.y, z: targetZ }, scaled(HOLD_MS));
+  // `msg.mix_repetitions` -- embedded directly on the op event by
+  // VisualizerBackend.aspirate96()/dispense96() -- see animateChannelOp()'s
+  // own mixRepetitions comment for what this does; same mechanism, just
+  // reading straight off the (single, shared) op event instead of a
+  // per-channel entry, since a 96-head mix is one op for the whole plate.
+  if (msg.mix_repetitions) {
+    const cycles = Math.min(msg.mix_repetitions, MAX_MIX_CYCLES);
+    for (let i = 0; i < cycles; i++) {
+      const direction = i % 2 === 0 ? 1 : -1;
+      core96Head.enqueue({ x: msg.x, y: msg.y, z: targetZ }, scaled(MIX_CYCLE_MS), () => core96Head.flowPulse(direction));
+    }
+  } else {
+    core96Head.enqueue({ x: msg.x, y: msg.y, z: targetZ }, scaled(HOLD_MS));
+  }
   core96Head.enqueue({ x: msg.x, y: msg.y, z: restZ }, scaled(RETRACT_MS));
 }
 
@@ -1475,6 +1520,20 @@ function dispatchOp(msg) {
       );
       break;
     }
+    // VisualizerBackend.incubate() -- lh.sleep()'s own event, see that
+    // method's own docstring. `msg.resources` (plural -- see
+    // incubate()'s own signature) lets one hold cover several resources
+    // at once, though every caller in this project's own demos only ever
+    // passes one; each gets its own independent queueIncubateAnimation()
+    // task on its own entry.animQueue, so if more than one were ever
+    // given, they'd all pulse together rather than one after another.
+    case "incubate":
+      for (const name of msg.resources ?? []) {
+        const entry = resourceIndex.get(name);
+        if (entry) queueIncubateAnimation(entry);
+      }
+      logEvent("incubate", (msg.resources ?? []).join(", "));
+      break;
     default:
       // resource-move / manual-jog events: not animated in v1, but still
       // worth surfacing in the log so the panel reflects everything the

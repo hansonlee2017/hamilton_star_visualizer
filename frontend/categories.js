@@ -44,6 +44,13 @@ export const CATEGORY_COLORS = {
   // the shimmer effect run_protocol() triggers (see animateThermocycler
   // Shimmer()).
   thermocycler: 0x8a5a3d,
+  // A cool, metallic grey-blue -- reads as "magnet hardware," distinct
+  // from both the neutral carrier grey underneath it and the warm
+  // thermocycler tone (this is a passive fixture, not an active
+  // instrument that ever runs its own animation the way the
+  // thermocycler's shimmer does). PlateAdapter's default category (e.g.
+  // an Alpaqua magnetic rack -- see examples/spri_cleanup_demo.py).
+  plate_adapter: 0x4f6b8a,
 };
 export const DEFAULT_COLOR = 0x6b7280;
 
@@ -75,6 +82,15 @@ export const CARRIER_CATEGORIES = new Set([
   // ODTC that visibly moves (see thermocycler_backend.py's docstring:
   // "opens and closes by horizontal move").
   "thermocycler",
+  // Per user direction: a magnetic plate adapter (e.g. an Alpaqua rack --
+  // see examples/spri_cleanup_demo.py) is a fixed deck fixture too, same
+  // "declared size_z is the full envelope, not the visible payload
+  // surface" gap as every other carrier here (its own dz -- see
+  // plate_adapter.py -- is 27.5mm of a declared 35mm size_z). Also makes
+  // gantry.js's own isFixedInstallation() correctly treat it as
+  // non-attachable, matching reality: it never moves, so a plate seated
+  // on it should never ride along with it.
+  "plate_adapter",
 ]);
 // tip_rack and plate have the same "declared size_z is bigger than the
 // visible surface" problem as carriers -- their actual payload (a TipSpot's

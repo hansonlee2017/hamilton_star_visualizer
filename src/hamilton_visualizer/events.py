@@ -236,6 +236,17 @@ def channel_ops_event(
     entry: Dict[str, Any] = {"channel": channel, "resource": op.resource.name, **point}
     if volume_attr is not None:
       entry["volume"] = getattr(op, volume_attr)
+    # `op.mix` is threaded straight through from `lh.aspirate(..., mix=
+    # Mix(...))`/`lh.dispense(..., mix=Mix(...))` -- present on every op
+    # regardless of op_name (the dataclasses always carry the field), but
+    # only meaningful for aspirate/dispense (pick_up_tips/drop_tips ops
+    # never set it). Only `repetitions` is surfaced: see
+    # VisualizerBackend.aspirate96()'s own comment on the 96-head
+    # equivalent for why volume/flow_rate aren't needed by the frontend's
+    # cycling animation.
+    mix = getattr(op, "mix", None)
+    if op_name in ("aspirate", "dispense") and mix is not None:
+      entry["mix_repetitions"] = mix.repetitions
     if tip is not None:
       entry["tip_type"] = type(tip).__name__
       # Real length/capacity of *this specific* tip -- lets the frontend
