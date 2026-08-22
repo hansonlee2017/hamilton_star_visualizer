@@ -112,7 +112,14 @@ async def main() -> None:
   print("Opening lid...")
   await tc.open_lid()
 
-  print("Thermocycler demo finished. Leaving the server up -- Ctrl+C to exit.")
+  # Without this, VisualizerServer's "replay" guard (see server.py: replay
+  # is only allowed before a run starts, or after it's finished) never
+  # opens back up -- the run "started" but never "finished" as far as the
+  # server's concerned, so clicking Replay silently does nothing.
+  await server.mark_finished()
+
+  print("Thermocycler demo finished -- click 'Replay' to watch it again.")
+  print("Leaving the server up -- Ctrl+C to exit.")
   await asyncio.Event().wait()
 
 
