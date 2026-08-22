@@ -88,7 +88,11 @@ const TIP_COLOR_BY_VOLUME = [
   [300, 0xffd54f], // yellow
   [Infinity, 0xffffff], // white
 ];
-const TIP_PRESENT_COLOR_FALLBACK = 0xe0b23d; // unknown capacity -- the old flat amber
+// Unknown capacity -- the old flat amber. Exported so gantry.js's
+// Core96Head can color its own "tips attached" glyph the same way (it has
+// no per-item tip capacity to bucket by, the same "unknown" case this
+// covers for a single channel/tip_spot).
+export const TIP_PRESENT_COLOR_FALLBACK = 0xe0b23d;
 export function tipColorForVolume(maxVolumeUl) {
   if (maxVolumeUl == null) return TIP_PRESENT_COLOR_FALLBACK;
   for (const [threshold, color] of TIP_COLOR_BY_VOLUME) {

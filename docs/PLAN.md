@@ -2696,6 +2696,24 @@ too.
       thin, already-tested reuse of `MotionUnit`, the same reasoning
       `Channel` itself wasn't separately unit-tested either).
 
+      Follow-up fix (same round, user-reported): "I did not see the tips
+      attached to the 96 well head." The first version only dimmed the
+      block's own opacity for tip-presence -- too subtle to read at a
+      glance, and not what was actually asked for ("the same
+      implementation as the multi-channel pipettes, where you can see the
+      tips attached to them"). Replaced with 96 individual tip cones (an
+      8-row x 12-column grid at the same 9mm `CHANNEL_PITCH_MM` a real
+      96-well plate and the 8 channels' own spacing already use, centered
+      on the block's footprint), using the *exact* geometry/rotation/color
+      a single `Channel`'s own `tipMesh` uses, toggled via `.visible` the
+      same way (not a hue/opacity change). Verified live -- confirmed
+      numerically (`core96Head.tipMeshes[0].visible`/`[95].visible ===
+      true` mid-sequence, `false` again after drop) and visually (slowed
+      the HUD to `0.25x` speed specifically to get a screenshot within the
+      now-longer tips-attached window -- a real amber 8x12 cone grid
+      visible hanging beneath the cyan block, matching a single channel's
+      tip glyph exactly).
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

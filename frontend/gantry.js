@@ -7,7 +7,7 @@
 
 import * as THREE from "three";
 import { mapPoint } from "./coordinates.js";
-import { tipColorForVolume, EMPTY_COLOR, EMPTY_OPACITY, FULL_OPACITY } from "./categories.js";
+import { tipColorForVolume, EMPTY_COLOR, TIP_PRESENT_COLOR_FALLBACK } from "./categories.js";
 import { TIP_PYRAMID_RADIUS, TIP_PYRAMID_HEIGHT, resourceIndex } from "./scene-builder.js";
 import { applyEmbeddedResourceState } from "./resource-state.js";
 import { queueLidAnimation, queueThermocyclerShimmer } from "./thermocycler.js";
@@ -470,6 +470,18 @@ const CORE96_HEIGHT_MM = 30; // visual thickness only -- not a real spec, just e
 // scene-builder.js's thermocycler lid uses around the real plate.
 const CORE96_ENGAGE_CLEARANCE_MM = 3;
 const CORE96_EMPTY_COLOR = 0x4fa8c9;
+// The head's own 96 tip positions: an 8-row x 12-column grid at the same
+// 9mm pitch a real 96-well plate (and CHANNEL_PITCH_MM, the 8 individual
+// channels' own spacing) already uses -- not offset to any one specific
+// plate's real A1 corner, just centered on the block's own footprint,
+// which is close enough to read correctly without needing per-target
+// well-position data. Each tip glyph is the exact same geometry/rotation/
+// color Channel.tipMesh uses for a single carried tip (per user
+// direction: "the same implementation as the multi-channel pipettes,
+// where you can see the tips attached to them") -- toggled by
+// setTips(present) via `.visible`, the same way, not a hue/opacity change.
+const CORE96_TIP_ROWS = 8;
+const CORE96_TIP_COLS = 12;
 // Parked position when nothing's queued -- off to one side so it doesn't
 // sit in the middle of a deck screenshot when unused. Not a real
 // Hamilton home-position value (this project doesn't model the 96-head's
@@ -489,15 +501,40 @@ class Core96Head {
     const geometry = new THREE.BoxGeometry(CORE96_SIZE_X_MM, CORE96_HEIGHT_MM, CORE96_SIZE_Y_MM);
     this.body = new THREE.Mesh(
       geometry,
-      new THREE.MeshLambertMaterial({ color: CORE96_EMPTY_COLOR, transparent: true, opacity: EMPTY_OPACITY })
+      new THREE.MeshLambertMaterial({ color: CORE96_EMPTY_COLOR, transparent: true, opacity: 0.85 })
     );
     // Group origin is the block's own *bottom* engaging face (matching
     // `pos.z`'s meaning as "where the head touches down"), so the body
-    // extends upward from there -- no per-tip length math needed, unlike
-    // Channel's tip glyph, since there's no single "tip point" concept for
-    // a whole rigid block.
+    // extends upward from there, centered on the group's own x/z origin
+    // (unlike scene-builder.js's corner-anchored resources) -- simplest
+    // frame for the tip grid below to be centered in too.
     this.body.position.y = CORE96_HEIGHT_MM / 2;
     this.group.add(this.body);
+
+    // 96 tip cones, hanging below the block the same way a single
+    // Channel's own tipMesh hangs below its body -- see this class's own
+    // CORE96_TIP_ROWS/COLS comment. Built once (not resized/recreated
+    // per pick-up, unlike Channel.setTip()'s real-tip-length geometry
+    // rebuild) -- there's no per-tip capacity data for a 96-head pick-up
+    // to react to yet (see setTips()'s own comment).
+    const tipGeometry = new THREE.ConeGeometry(CHANNEL_TIP_RADIUS, CHANNEL_TIP_HEIGHT, 4);
+    const tipMaterial = new THREE.MeshLambertMaterial({ color: TIP_PRESENT_COLOR_FALLBACK });
+    this.tipMeshes = [];
+    for (let row = 0; row < CORE96_TIP_ROWS; row++) {
+      for (let col = 0; col < CORE96_TIP_COLS; col++) {
+        const tip = new THREE.Mesh(tipGeometry, tipMaterial);
+        const localX = (col - (CORE96_TIP_COLS - 1) / 2) * CHANNEL_PITCH_MM;
+        const localZ = (row - (CORE96_TIP_ROWS - 1) / 2) * CHANNEL_PITCH_MM;
+        tip.position.set(localX, -CHANNEL_TIP_HEIGHT / 2, localZ);
+        // Flip apex-down + diamond-facing, exactly matching Channel's own
+        // tipMesh and scene-builder.js's resting-tip pyramids.
+        tip.rotation.x = Math.PI;
+        tip.rotation.y = Math.PI / 4;
+        tip.visible = false;
+        this.group.add(tip);
+        this.tipMeshes.push(tip);
+      }
+    }
 
     gantryGroup.add(this.group);
     this.applyPosition();
@@ -512,16 +549,16 @@ class Core96Head {
     this.group.position.copy(p);
   }
 
-  // Only opacity distinguishes tip-presence (no hue change, unlike a
-  // single Channel's capacity-colored tip) -- there's no one "this head's
-  // tip capacity" the way a Channel's tipColorForVolume() has one, since
-  // pick_up_tips96 doesn't currently thread a representative tip's own
-  // volume through (see visualizer_backend.py's pick_up_tips96 -- would be
-  // a reasonable future addition, mirroring channel_ops_event()'s
-  // tip_max_volume_ul, not needed for a first version of this).
+  // Toggles all 96 tip cones' visibility at once -- no hue/capacity
+  // choice to make the way a single Channel's tipColorForVolume() has,
+  // since pick_up_tips96 doesn't currently thread a representative tip's
+  // own volume through (see visualizer_backend.py's pick_up_tips96 --
+  // would be a reasonable future addition, mirroring
+  // channel_ops_event()'s tip_max_volume_ul, not needed for a first
+  // version of this).
   setTips(present) {
     this.hasTips = present;
-    this.body.material.opacity = present ? FULL_OPACITY : EMPTY_OPACITY;
+    for (const tip of this.tipMeshes) tip.visible = present;
   }
 
   enqueue(target, duration, onComplete) {
