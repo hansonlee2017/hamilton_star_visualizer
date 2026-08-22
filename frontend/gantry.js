@@ -1065,6 +1065,34 @@ function animateCarriedPlateTo(x, y, z, onArrive) {
   carriedPlate.enqueue({ x, y, z }, scaled(DESCEND_MS), onArrive);
 }
 
+// One animateGripperStop() call's own total duration (rise+x+y+descend) --
+// what a *carried* plate needs to sit out, doing nothing, for each stop a
+// pickup enqueues on the channels *before* they've actually grabbed it
+// (the pad-attach stop, if any, and the grip-the-resource stop itself).
+const GRIPPER_STOP_MS = RISE_MS + X_MOVE_MS + Y_MOVE_MS + DESCEND_MS;
+
+// Holds the carried plate exactly still (no target change on any axis --
+// MotionUnit's own "stay wherever this leg starts" null-target meaning,
+// see enqueue()'s docstring) for `stops` gripper stops' worth of real
+// time. Enqueued from core_pick_up_resource's own handler, matching
+// however many stops it *itself* just enqueued on the channels (1, or 2
+// when a pad-attach leg came first) -- without this, the plate's own
+// first *real* travel leg (enqueued later, from a core_move_picked_up_
+// resource/core_drop_resource event) started playing the instant that
+// later event's handler ran, which -- per this whole feature's own
+// established "the backend has no reason to wait between back-to-back
+// calls" timing -- is routinely *before* the channels have actually
+// finished approaching and descending onto the resource at all (user-
+// reported: "it is moving during the gripper picked up animation"). The
+// plate visibly started traveling before it had even been "grabbed."
+// Holding it here keeps its own timeline in lockstep with the channels'
+// real one, the same way animateGripperStop()'s own idle-channel dragging
+// keeps every *other* channel in lockstep with whichever two are active.
+function holdCarriedPlate(stops) {
+  if (!carriedPlate) return;
+  carriedPlate.enqueue({ x: null, y: null, z: null }, scaled(GRIPPER_STOP_MS * stops));
+}
+
 export function handleOpEvent(msg) {
   switch (msg.op) {
     case "pick_up_tips":
@@ -1242,16 +1270,28 @@ export function handleOpEvent(msg) {
       // visualizer_backend.py's own `_core_grippers_point()`) falls back
       // to the old instant toggle instead of skipping the pad glyph
       // entirely.
+      let stopsBeforeGrip = 0;
       if (needs_attach) {
         if (pad_x != null) {
           const pad = padTargets(back, front, pad_y, pad_z);
           animateGripperStop(pad_x, pad.targetYFor, pad.targetZFor, front, () => setGripperPadChannels(back, front));
+          stopsBeforeGrip = 1;
         } else {
           setGripperPadChannels(back, front);
         }
       }
       const grip = gripResourceTargets(back, front, msg.y, msg.z);
       animateGripperStop(msg.x, grip.targetYFor, grip.targetZFor, front);
+      // The plate itself doesn't move during this pickup (it's not
+      // "grabbed" until the channels have actually risen, traveled, and
+      // descended onto it -- the grip stop just enqueued above) -- but it
+      // *has* already been reparented and wrapped in a CarriedPlate this
+      // same handler, so without holding it here, whatever real travel
+      // legs a *later* core_move_picked_up_resource/core_drop_resource
+      // event enqueues would start playing immediately when that event's
+      // handler runs, not once the channels actually finish this pickup's
+      // own approach -- see holdCarriedPlate()'s own comment.
+      holdCarriedPlate(stopsBeforeGrip + 1);
       logEvent("core_pick_up_resource", msg.resource ?? "");
       break;
     }

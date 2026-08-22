@@ -3254,6 +3254,56 @@ move by itself. It seems to teleport to TC and then move from TC to
       interpolation, nowhere near teleport-scale), correctly starting and
       ending at the real `plate_carrier_1-0` coordinate.
 
+Third follow-up, same round -- user-reported: "the plate moves fine, but
+it is moving during the gripper picked up animation. I assume we didn't
+add the time delay there?" -- correct guess, and the same fix the user
+independently suggested by name ("you put no-op in the pipette queue to
+make everything synchronize, I am wondering if you can do something
+similar?").
+
+- [x] **Root cause**: `core_pick_up_resource`'s handler reparents the
+      resource and wraps it in a `CarriedPlate` *synchronously*, but never
+      enqueues anything onto it during the pickup itself (correct -- the
+      plate hasn't been grabbed yet). The problem: nothing else marked
+      that gap either. When the very next event (`core_move_picked_up_
+      resource`/`core_drop_resource`) called `animateCarriedPlateTo()`,
+      its real travel legs went straight onto the (empty) `CarriedPlate`
+      queue and started playing on the very next tick -- regardless of
+      whether the channels had actually finished rising, traveling, and
+      descending onto the resource yet. Since that next event routinely
+      arrives well before the pickup's own ~1.1-2.2s approach animation
+      finishes (same timing this whole feature keeps running into), the
+      plate would start -- and often *finish* -- its own travel while the
+      channels were still only approaching.
+- [x] **Fix**: a new `holdCarriedPlate(stops)`, called from
+      `core_pick_up_resource`'s own handler right after enqueueing its own
+      stop(s) on the channels (1, or 2 when a pad-attach leg came first).
+      Enqueues a single no-op leg (`{x: null, y: null, z: null}` --
+      MotionUnit's own "stay wherever this leg starts" meaning) sized to
+      match that same total duration, exactly mirroring how
+      `nudgeChannel()`/`animateGripperStop()` already pad an *idle*
+      channel's own queue out to match an *active* one's total leg time so
+      the whole gantry stays in lockstep -- same idea, just for the
+      plate's queue instead of a channel's.
+- [x] Verified with a new deterministic Node test: pickup (needs_attach,
+      two stops) immediately followed by drop, with only a little real
+      ticking in between (mirroring the backend's actual back-to-back
+      timing, not zero) -- confirmed the plate had already reached the
+      *drop's* own destination while the channels were still barely into
+      their first pickup stop on the pre-fix code, and stayed exactly at
+      its true starting position through the whole pickup on the post-fix
+      code. (Needed one iteration to get right: the test's own hand-typed
+      pickup coordinates didn't initially match the fixture's real top-
+      center exactly, which -- since even a no-op hold leg's first tick
+      still calls `applyPosition()` -- showed up as a small false-positive
+      shift of its own; corrected once identified.) Also verified live:
+      dense position/channel polling over a full run showed the plate's
+      first actual position change landing only once channels 6/7 had
+      already arrived at the resource's real x and settled at their
+      descended z (both channels' own z had stopped changing across
+      consecutive samples) -- the hold releasing at exactly the intended
+      moment, not before.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
