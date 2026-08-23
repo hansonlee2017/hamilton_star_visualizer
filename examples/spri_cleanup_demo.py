@@ -33,7 +33,13 @@ and off of the magnet:
      (110uL original sample + 88uL beads) out, discard the tips with it.
   6. **Wash 1**: 200uL of 80% ethanol in (from a full-plate-footprint
      reservoir this time -- see below), a 30-minute incubation, then
-     removed the same way as step 5.
+     removed -- the *same* tips the whole way through (add, hold through
+     the incubation, then remove), only discarded at the very end. Unlike
+     step 5's own removal (which follows a *different* liquid -- the bead
+     suspension -- so needs its own fresh tips), this tip never touches
+     anything but ethanol and the plate the entire time, so reusing it
+     costs nothing in contamination risk and saves a full 96-tip rack per
+     wash. Per user direction.
   7. **Wash 2**: step 6, repeated once more.
   8. 1-minute dry incubation (open air, no lid -- this project doesn't
      model an ODTC-style lid for the Alpaqua rack).
@@ -148,31 +154,31 @@ async def main() -> None:
   while True:
     deck = STARDeck()
 
-    # Eight fresh 96-tip racks -- one per liquid-handling step, per user
-    # direction ("fresh tips every step"): steps 5-7's own removal/wash
-    # pairs, step 10's elution, and step 13's transfer each consume a full
-    # 96 spots in one 96-head pickup; step 1's own rack also ends up fully
-    # consumed, just 8 channels (one column) at a time, 12 times over --
-    # see that step's own comment below for why it needs a fresh 8 every
-    # column instead of one pickup for the whole step.
+    # Six fresh 96-tip racks -- one per liquid-handling step that needs its
+    # own fresh tips, per user direction ("fresh tips every step"): step
+    # 5's removal, step 10's elution, and step 13's transfer each consume a
+    # full 96 spots in one 96-head pickup; step 1's own rack also ends up
+    # fully consumed, just 8 channels (one column) at a time, 12 times
+    # over -- see that step's own comment below. Each ethanol wash (steps
+    # 6-7) gets exactly *one* rack, not two: per user direction, the same
+    # tips that add the ethanol are held through the wash incubation and
+    # then used to remove it too, since nothing but ethanol and the plate
+    # ever touches them (see steps 6/7's own comment above for why that's
+    # safe here but not for step 5, which follows a *different* liquid).
     tip_carrier_1 = TIP_CAR_480_A00(name="tip_carrier_1")
     tip_carrier_2 = TIP_CAR_480_A00(name="tip_carrier_2")
     tip_rack_mix = hamilton_96_tiprack_300uL_filter(name="tip_rack_mix")
     tip_rack_remove_supernatant = hamilton_96_tiprack_300uL_filter(name="tip_rack_remove_supernatant")
-    tip_rack_etoh1_add = hamilton_96_tiprack_300uL_filter(name="tip_rack_etoh1_add")
-    tip_rack_etoh1_remove = hamilton_96_tiprack_300uL_filter(name="tip_rack_etoh1_remove")
-    tip_rack_etoh2_add = hamilton_96_tiprack_300uL_filter(name="tip_rack_etoh2_add")
-    tip_rack_etoh2_remove = hamilton_96_tiprack_300uL_filter(name="tip_rack_etoh2_remove")
+    tip_rack_etoh1 = hamilton_96_tiprack_300uL_filter(name="tip_rack_etoh1")
+    tip_rack_etoh2 = hamilton_96_tiprack_300uL_filter(name="tip_rack_etoh2")
     tip_rack_elution_add = hamilton_96_tiprack_300uL_filter(name="tip_rack_elution_add")
     tip_rack_transfer = hamilton_96_tiprack_300uL_filter(name="tip_rack_transfer")
     tip_carrier_1[0] = tip_rack_mix
     tip_carrier_1[1] = tip_rack_remove_supernatant
-    tip_carrier_1[2] = tip_rack_etoh1_add
-    tip_carrier_1[3] = tip_rack_etoh1_remove
-    tip_carrier_1[4] = tip_rack_etoh2_add
-    tip_carrier_2[0] = tip_rack_etoh2_remove
-    tip_carrier_2[1] = tip_rack_elution_add
-    tip_carrier_2[2] = tip_rack_transfer
+    tip_carrier_1[2] = tip_rack_etoh1
+    tip_carrier_1[3] = tip_rack_etoh2
+    tip_carrier_1[4] = tip_rack_elution_add
+    tip_carrier_2[0] = tip_rack_transfer
     deck.assign_child_resource(tip_carrier_1, rails=1)
     deck.assign_child_resource(tip_carrier_2, rails=7)
 
@@ -264,20 +270,24 @@ async def main() -> None:
     await lh.discard_tips96()
 
     # -- 4/5. Two ethanol washes --------------------------------------------
-    etoh_add_racks = [tip_rack_etoh1_add, tip_rack_etoh2_add]
-    etoh_remove_racks = [tip_rack_etoh1_remove, tip_rack_etoh2_remove]
+    # One tip rack per wash, not two: the same tips add the ethanol, sit
+    # attached to the 96 head through the incubation (no discard in
+    # between), then remove it -- see this module's own docstring and the
+    # deck-setup comment above for why that's safe here (nothing but
+    # ethanol and the plate ever touches them) but not for step 5's own
+    # supernatant removal, which follows the bead suspension instead. Per
+    # user direction.
+    etoh_racks = [tip_rack_etoh1, tip_rack_etoh2]
     for wash_num in (1, 2):
       print(f"Wash {wash_num}: adding {ETHANOL_VOLUME_UL:g}uL of 80% ethanol to every well...")
-      await lh.pick_up_tips96(etoh_add_racks[wash_num - 1])
+      await lh.pick_up_tips96(etoh_racks[wash_num - 1])
       await lh.aspirate96(ethanol_reservoir, volume=ETHANOL_VOLUME_UL)
       await lh.dispense96(pcr_plate, volume=ETHANOL_VOLUME_UL)
-      await lh.discard_tips96()
 
       print(f"Wash {wash_num} incubation ({WASH_INCUBATION_S // 60} min)...")
       await lh.sleep(WASH_INCUBATION_S, pcr_plate)
 
       print(f"Wash {wash_num}: removing the ethanol from every well...")
-      await lh.pick_up_tips96(etoh_remove_racks[wash_num - 1])
       await lh.aspirate96(pcr_plate, volume=ETHANOL_VOLUME_UL)
       await lh.discard_tips96()
 

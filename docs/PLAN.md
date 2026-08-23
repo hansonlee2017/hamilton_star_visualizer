@@ -4297,6 +4297,49 @@ incubation-timing policy -- see this session's plan-mode transcript):
       as flat blocks instead of the previous cone/cylinder shapes. Full
       unit suite: 36/36, unchanged.
 
+**Second follow-up, same round: share one tip rack across each ethanol
+wash's own add-then-remove pair, not one rack each.** User: the tips that
+dispense ethanol into the plate can safely be the *same* ones that later
+aspirate it back out, saving a rack per wash. Unlike step 1's own bead
+mixing (a `Mix`-enabled tip dips into the plate's sample, then would
+recontaminate the *shared* bead reservoir on its next column's aspirate --
+see the fix above), an ethanol wash's tips only ever touch ethanol and the
+plate for their entire lifetime, so holding them through the wash
+incubation instead of discarding-and-repicking is free contamination-wise.
+
+- [x] `examples/spri_cleanup_demo.py`: `tip_rack_etoh{1,2}_add`/
+      `tip_rack_etoh{1,2}_remove` (4 racks) collapsed into `tip_rack_etoh
+      {1,2}` (2 racks) -- `pick_up_tips96()` once per wash, no
+      `discard_tips96()` between the add's `dispense96()` and the wash's
+      own `lh.sleep()`, `aspirate96()` (removal) and `discard_tips96()`
+      only at the very end of each wash. Six tip racks total now (was
+      eight), one `TIP_CAR_480_A00` fully occupied plus one spot on a
+      second, down from two carriers at 5+3.
+- [x] **A live-testing lesson worth recording, not a code bug:** the first
+      two live-browser checks of this exact fix both connected to a
+      *stale* server process left running from an earlier round (found
+      and killed via `Get-CimInstance Win32_Process -Filter "CommandLine
+      LIKE '%spri_cleanup_demo.py%'"` -- more than one accumulates per
+      `uv run` launch, since `uv.exe` and the `python.exe` it spawns both
+      match), serving pre-fix code -- confirmed unambiguously by the event
+      log itself showing the *old* rack name (`tip_rack_etoh1_add`) that
+      no longer exists in the committed script at all. This is the same
+      root cause the user's *previous* "you didn't change the tips" report
+      turned out to have. Always kill every matching process and confirm
+      the port is actually free (a plain socket-bind probe, not just
+      "the tool call didn't error") immediately before a live check from
+      now on, not just once per session.
+- [x] Verified: re-captured event stream (`pick_up_tips96`/`drop_tips96`
+      dropped from 7 to 5, confirming the merge), full Node replay test
+      still all-green (82/82 ops dispatch, all 7 incubate gaps and the
+      mix-backlog check unchanged), full unit suite 36/36. Live browser
+      check (this time against a freshly-confirmed, singly-running
+      server) shows the exact intended sequence for each wash:
+      `pick_up_tips96 tip_rack_etoh1` -> `aspirate96 ethanol_reservoir` ->
+      `dispense96 pcr_plate` -> `incubate pcr_plate (30 min)` -> `aspirate96
+      pcr_plate` -> `drop_tips96` -> next wash's own fresh pickup -- no
+      `drop_tips96` between the add and the incubation any more.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
