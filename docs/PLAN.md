@@ -4340,6 +4340,54 @@ incubation instead of discarding-and-repicking is free contamination-wise.
       pcr_plate` -> `drop_tips96` -> next wash's own fresh pickup -- no
       `drop_tips96` between the add and the incubation any more.
 
+## Review round 52
+
+User: "I am wondering if you can have 2x, 4x and 8x speed for the
+visualizer. If you can, can you change the speed on the fly during
+playback?"
+
+- [x] **2x/4x/8x speed.** `frontend/duration-scale.js`'s `durationScale`
+      was already a plain multiplier every leg/shimmer/incubate duration
+      gets scaled by (`nominalMs * durationScale`), so *larger* than 1
+      plays slower and *smaller* than 1 plays faster -- the existing HUD
+      dropdown (`frontend/index.html`'s `#speed-select`) only ever offered
+      values >= 1 (1/2/4, i.e. 1x/0.5x/0.25x). Added three more `<option>`s
+      at 0.5/0.25/0.125 (2x/4x/8x) -- no `dom.js`/`duration-scale.js`
+      change needed at all, since the existing `change` handler
+      (`setDurationScale(Number(speedSelect.value) || 1)`) was already
+      fully generic. Reordered the list slowest -> fastest (0.25x, 0.5x,
+      1x, 2x, 4x, 8x) with `1x` marked `selected` explicitly, since it's
+      no longer the first option in source order.
+- [x] **Already worked on the fly, for free.** Every duration in this
+      project's own animation stack is resolved *lazily*, at the moment a
+      task actually starts, never baked in at enqueue time for anything
+      still queued behind it: `thermocycler.js`/`incubate.js`'s tasks use
+      `duration: () => X * getDurationScale()` (a function, re-evaluated
+      in `AnimationQueue.update()` right when that task's own turn
+      comes); `gantry.js`'s channel/96-head legs call `scaled(MS)` at the
+      moment their *op* dispatches (`dispatchOp()`, gated by the Round 50
+      global queue's `isEverythingIdle()`), which for anything not yet
+      dispatched is always in the future relative to a speed change. Net
+      effect: a speed change takes effect starting with whichever op/task
+      hasn't started playing yet -- immediately for anything still queued,
+      but never retroactively for whatever's already mid-flight (the same
+      way changing a video's playback speed doesn't rewind what's already
+      played). No code change needed for this half of the request at all.
+- [x] Verified: a live browser check confirmed 8x speed running a
+      whole `core96_demo.py` pass (4 ops) to completion in under 2 real
+      seconds (vs. several seconds at 1x). The "on the fly, not
+      retroactive" claim specifically needed frame-exact verification --
+      live-browser wall-clock polling can't resolve it at all (tool
+      round-trip latency alone dwarfs an 8x op's own ~200ms duration) --
+      via this project's own deterministic Node replay technique instead:
+      fed two real captured ops, switched `durationScale` to 0.125 ten
+      frames into the first op's own flight, and confirmed the first op
+      still took its full original ~136 frames (~2267ms, matching 1x)
+      while the second -- dispatched only after the switch -- took just
+      10 frames (~167ms, correctly 8x). Full `node --test
+      ./tests/frontend/*.test.js`: 36/36, unchanged (a `<select>` markup
+      change with an already-generic handler needs no new coverage).
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

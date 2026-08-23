@@ -79,10 +79,21 @@
     <button id="start-btn" disabled title="Tell the waiting protocol script to begin">&#9654; Start Protocol</button>
     <button id="reset-btn" disabled title="Start the whole protocol over with new parameters (only once the current run has finished)">&#8635; Reset</button>
     <button id="replay-btn" disabled title="Re-run everything this server has recorded so far, from the start">&#8635; Replay</button>
+    <!-- value is the duration-scale multiplier itself (frontend/duration-
+         scale.js), not the display speed -- a leg's own duration is
+         `nominalMs * durationScale`, so *larger* values play *slower*
+         (0.25x speed = every leg takes 4x as long = value 4) and
+         *smaller* values play faster (2x speed = every leg takes half as
+         long = value 0.5). Listed slowest -> fastest, 1x (value 1)
+         marked `selected` explicitly since it's no longer the first
+         option in source order (see duration-scale.js's own default). -->
     <select id="speed-select" title="Animation playback speed">
-      <option value="1">1&times; speed</option>
-      <option value="2">0.5&times; speed</option>
       <option value="4">0.25&times; speed</option>
+      <option value="2">0.5&times; speed</option>
+      <option value="1" selected>1&times; speed</option>
+      <option value="0.5">2&times; speed</option>
+      <option value="0.25">4&times; speed</option>
+      <option value="0.125">8&times; speed</option>
     </select>
   </div>
 
