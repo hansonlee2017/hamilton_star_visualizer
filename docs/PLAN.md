@@ -4388,6 +4388,49 @@ playback?"
       ./tests/frontend/*.test.js`: 36/36, unchanged (a `<select>` markup
       change with an already-generic handler needs no new coverage).
 
+## Review round 53
+
+User request: a small demo specifically for under-volume error handling
+-- transfer 100uL from column 1 of one flat-bottom plate to another, with
+a commented-out line to deliberately under-fill one well, and a real
+``try``/``except`` around the transfer that sends an SMS alert on
+failure, reusing a ``sms_message.py`` script the user had already written
+and tested against their own ``.env``.
+
+- [x] New `examples/undervolume_error_demo.py` -- one column (8-channel,
+      matching `pcr_setup_demo.py`'s own per-column fill idiom, not the
+      96-head), source wells pre-filled to 150uL, a single commented-out
+      `source_plate.get_item("D1").tracker.set_volume(50.0)` line to
+      trigger the error path. The transfer itself (`pick_up_tips`/
+      `aspirate`/`dispense`/`discard_tips`) runs inside a broad `except
+      Exception` -- deliberate, per user direction ("the except portion
+      should send an SMS message... when this happens"), not narrowed to
+      `TooLittleLiquidError` specifically, so *any* transfer failure gets
+      the same alert treatment.
+- [x] `examples/sms_message.py` refactored, behavior-preserving: the
+      original top-level script (ran immediately on import *or* direct
+      execution alike) now exposes a `send_sms(body, subject="")`
+      function, with `if __name__ == "__main__": send_sms(<the exact
+      original test message>)` preserving the direct-run behavior the
+      user had already tested unchanged. Needed because the original
+      shape would have fired the SMS the instant the demo script imported
+      it, unconditionally, regardless of whether a real error ever
+      happened.
+- [x] Verified without ever sending a real SMS: ran the real protocol
+      logic against a real backend (no live socket, same technique this
+      whole session's own `capture_events.py` established), with
+      `sms_message` pre-substituted in `sys.modules` for a stub that
+      records calls instead of touching SMTP -- confirmed the success
+      path (D1 left at 150uL) completes with zero exceptions and zero
+      `send_sms` calls, and the error path (D1 forced to 50uL) raises a
+      real `pylabrobot.resources.errors.TooLittleLiquidError` ("Not
+      enough liquid in container: 100.0uL > 50.0uL"), gets caught, and
+      calls `send_sms` exactly once with a clear description. No new
+      frontend surface at all (every op type used --
+      pick_up_tips/aspirate/dispense/drop_tips -- already has extensive
+      replay-test coverage from earlier rounds), so no separate live
+      browser check.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

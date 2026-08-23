@@ -10,6 +10,7 @@ requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.141.1",
     "pylabrobot>=0.2.2",
+    "python-dotenv>=1.2.3",
     "uvicorn[standard]>=0.52.3",
     "websockets>=17.0.1",
 ]

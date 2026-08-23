@@ -13,3 +13,4 @@ node_modules/
 !frontend/node_modules/three/package.json
 .DS_Store
 *.log
+.env

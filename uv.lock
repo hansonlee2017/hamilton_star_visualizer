@@ -85,6 +85,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "pylabrobot" },
+    { name = "python-dotenv" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
 ]
@@ -98,6 +99,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "pylabrobot", specifier = ">=0.2.2" },
+    { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
     { name = "websockets", specifier = ">=17.0.1" },
 ]
