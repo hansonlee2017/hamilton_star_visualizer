@@ -4431,6 +4431,44 @@ and tested against their own ``.env``.
       replay-test coverage from earlier rounds), so no separate live
       browser check.
 
+**Follow-up, same round: name the specific well that failed in the SMS.**
+User asked whether the error message could name which well failed; first
+attempt snapshotted each well's own volume *before* the real
+`lh.aspirate()` call so the `except` block could reference it -- user
+correctly rejected this ("We don't want a preflight check. The point of
+this demo is to show we can do error handling and report in real time.").
+
+- [x] Replaced with a purely reactive fix, entirely inside the `except`
+      block, running only once the real error has already happened:
+      `TooLittleLiquidError` itself carries no reference to which
+      resource raised it (confirmed by reading `pylabrobot`'s own
+      `volume_tracker.py` -- just the two volumes, in the message
+      string), and naively re-checking `get_used_volume()` right after
+      catching it is actively wrong here, not just imprecise --
+      `LiquidHandler.aspirate()` decrements each channel's own
+      `pending_volume` sequentially, in column order, as it validates
+      them one at a time, and the real failure short-circuits straight
+      out of that loop, skipping the `commit()`/`rollback()` step that
+      would otherwise clean up whichever channels were already validated
+      (and decremented) *before* the one that actually failed -- with
+      only D1 under-filled, A1/B1/C1 each get processed before the loop
+      ever reaches D1's own failing check, so all three would misleadingly
+      also read as "short" if checked as-is (confirmed live). Calling
+      `.rollback()` on every column-1 well's own tracker first -- which
+      only ever restores `pending_volume` back to its last real,
+      committed value, a no-op for any well genuinely untouched -- makes
+      the `get_used_volume() < TRANSFER_VOLUME_UL` check right after it
+      accurate, with no foreknowledge or preemptive validation involved
+      at any point before the real op is attempted.
+- [x] Verified live (well-naming stub test): with only D1 forced to 50uL,
+      the resulting SMS body correctly reads `... -- short well(s):
+      source_plate_well_D1 (50uL)`, and does **not** also name A1/B1/C1 --
+      confirming the rollback step actually fixes the exact
+      misidentification bug described above, not just in theory. Success
+      path (no wells under-filled) re-confirmed unaffected: the `try`
+      block itself is byte-for-byte the same as this round's first
+      version.
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +

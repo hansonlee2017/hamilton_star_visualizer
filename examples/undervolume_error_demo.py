@@ -110,9 +110,37 @@ async def main() -> None:
       await lh.discard_tips()
       print("Transfer completed successfully.")
     except Exception as exc:  # noqa: BLE001 - deliberately broad: alert on *any* transfer failure, not just under-volume
+      # Purely reactive, not a preflight check -- nothing about the
+      # source wells is inspected before the real lh.aspirate() attempt
+      # above; this only runs once it has already failed. Names exactly
+      # which well(s) didn't have enough, since TooLittleLiquidError
+      # itself carries no resource reference at all (see pylabrobot's
+      # own volume_tracker.py -- just the two volumes in its message
+      # string). A naive `get_used_volume() < TRANSFER_VOLUME_UL` check
+      # right here would be wrong, though: LiquidHandler.aspirate()
+      # decrements each channel's own pending_volume sequentially, in
+      # column order, as it validates them one at a time, and the real
+      # failure short-circuits straight out of that loop -- skipping the
+      # commit()/rollback() step that would otherwise clean up whichever
+      # channels were already validated (and decremented) *before* the
+      # one that actually failed. With only D1 under-filled, A1/B1/C1
+      # each get processed (and decremented) before the loop ever reaches
+      # D1's own failing check, so they're left holding a misleadingly
+      # -low pending_volume too -- confirmed live. `rollback()` restores
+      # each tracker's own pending_volume back to its last real,
+      # committed value first, so the volume check right after actually
+      # reflects what's real.
+      for well in source_plate["A1:H1"]:
+        well.tracker.rollback()
+      short_wells = [
+        f"{well.name} ({well.tracker.get_used_volume():g}uL)"
+        for well in source_plate["A1:H1"]
+        if well.tracker.get_used_volume() < TRANSFER_VOLUME_UL
+      ]
+      well_detail = f" -- short well(s): {', '.join(short_wells)}" if short_wells else ""
       error_description = (
         f"Hamilton Visualizer alert: column-1 transfer failed "
-        f"({type(exc).__name__}): {exc}"
+        f"({type(exc).__name__}): {exc}{well_detail}"
       )
       print(f"Transfer failed -- sending SMS alert.\n  {error_description}")
       send_sms(error_description, subject="Hamilton Visualizer: transfer error")
