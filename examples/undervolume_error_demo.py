@@ -42,7 +42,7 @@ from pylabrobot.liquid_handling import LiquidHandler
 from pylabrobot.liquid_handling.backends.chatterbox import LiquidHandlerChatterboxBackend
 from pylabrobot.resources import (
   PLT_CAR_L5AC_A00,
-  STARDeck,
+  STARLetDeck,
   TIP_CAR_480_A00,
   cor_96_wellplate_360uL_Fb,
   hamilton_96_tiprack_300uL_filter,
@@ -65,7 +65,7 @@ async def main() -> None:
   # VisualizerBackend's per-resource state callbacks all get a clean slate
   # this way, for free).
   while True:
-    deck = STARDeck()
+    deck = STARLetDeck()
 
     tip_carrier = TIP_CAR_480_A00(name="tip_carrier_1")
     tip_rack = hamilton_96_tiprack_300uL_filter(name="tip_rack_1")
