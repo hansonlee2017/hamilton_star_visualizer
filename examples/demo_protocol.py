@@ -44,6 +44,24 @@ from hamilton_visualizer import VisualizerBackend, VisualizerServer
 
 
 async def main() -> None:
+  # -- wire up the visualizer -------------------------------------------------
+  server = VisualizerServer()
+  await server.start()
+
+  # Wrapped in try/finally so Ctrl-C (or any other early exit) still lets
+  # the visualizer server shut down cleanly -- server.stop() tells uvicorn
+  # to release its socket instead of leaving it bound, which is what
+  # produces a wall of tracebacks on Ctrl-C otherwise (asyncio.run()
+  # abruptly cancelling the server's own still-running background task)
+  # and also explains "port already in use" on the next run.
+  try:
+    await _run(server)
+  finally:
+    print("Shutting down the visualizer server...")
+    await server.stop()
+
+
+async def _run(server: VisualizerServer) -> None:
   # -- deck layout: a tip carrier and a plate carrier on a STARLet deck -----
   deck = STARLetDeck()
 
@@ -58,10 +76,6 @@ async def main() -> None:
   plate_carrier[0] = source_plate
   plate_carrier[1] = dest_plate
   deck.assign_child_resource(plate_carrier, rails=9)
-
-  # -- wire up the visualizer -------------------------------------------------
-  server = VisualizerServer()
-  await server.start()
 
   inner_backend = LiquidHandlerChatterboxBackend(num_channels=8)
   backend = VisualizerBackend(inner_backend, server)
@@ -103,4 +117,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-  asyncio.run(main())
+  try:
+    asyncio.run(main())
+  except KeyboardInterrupt:
+    print("\nStopped.")

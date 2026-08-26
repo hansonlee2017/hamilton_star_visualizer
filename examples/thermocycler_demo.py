@@ -89,6 +89,20 @@ async def main() -> None:
   server = VisualizerServer()
   await server.start()
 
+  # Wrapped in try/finally so Ctrl-C (or any other early exit) still lets
+  # the visualizer server shut down cleanly -- server.stop() tells uvicorn
+  # to release its socket instead of leaving it bound, which is what
+  # produces a wall of tracebacks on Ctrl-C otherwise (asyncio.run()
+  # abruptly cancelling the server's own still-running background task)
+  # and also explains "port already in use" on the next run.
+  try:
+    await _run(server)
+  finally:
+    print("Shutting down the visualizer server...")
+    await server.stop()
+
+
+async def _run(server: VisualizerServer) -> None:
   # "Start the entire thing over" (this module's docstring) rebuilds a
   # completely fresh deck/thermocycler/backend each pass, rather than
   # trying to hand-reset the previous run's lid/plate state in place -- the
@@ -174,4 +188,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-  asyncio.run(main())
+  try:
+    asyncio.run(main())
+  except KeyboardInterrupt:
+    print("\nStopped.")

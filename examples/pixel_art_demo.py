@@ -741,32 +741,6 @@ def _clamped_word(raw: Any, default: str) -> str:
 
 
 async def main() -> None:
-  # -- deck layout: a tip carrier, a 5-site plate carrier, a reservoir -----
-  deck = STARLetDeck()
-
-  tip_carrier = TIP_CAR_480_A00(name="tip_carrier_1")
-  tip_rack = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL")
-  tip_carrier[0] = tip_rack
-  deck.assign_child_resource(tip_carrier, rails=1)
-
-  # PLT_CAR_L5AC_A00 -- the "L5" is 5 plate sites, one per character of
-  # whatever word ends up chosen. Named by *position* (plate_0..plate_4),
-  # not by character -- a word can repeat a character (e.g. "HELLO"), so a
-  # character can't be used as a unique key the way the old fixed "ROCHE"
-  # demo's plate_R/plate_O/... naming did.
-  plate_carrier = PLT_CAR_L5AC_A00(name="plate_carrier_1")
-  plates: List[Plate] = []
-  for i in range(WORD_LENGTH):
-    plate = cor_96_wellplate_360uL_Fb(name=f"plate_{i}")
-    plate_carrier[i] = plate
-    plates.append(plate)
-  deck.assign_child_resource(plate_carrier, rails=7)
-
-  reservoir_carrier = Trough_CAR_5R60_A00(name="reservoir_carrier_1")
-  ink_reservoir = hamilton_1_trough_60mL_Vb(name="ink_reservoir")
-  reservoir_carrier[2] = ink_reservoir
-  deck.assign_child_resource(reservoir_carrier, rails=13)
-
   # -- wire up the visualizer -------------------------------------------------
   server = VisualizerServer()
   await server.start()
@@ -796,6 +770,46 @@ async def main() -> None:
       },
     ]
   )
+
+  # Wrapped in try/finally so Ctrl-C (or any other early exit) still lets
+  # the visualizer server shut down cleanly -- server.stop() tells uvicorn
+  # to release its socket instead of leaving it bound, which is what
+  # produces a wall of tracebacks on Ctrl-C otherwise (asyncio.run()
+  # abruptly cancelling the server's own still-running background task)
+  # and also explains "port already in use" on the next run.
+  try:
+    await _run(server)
+  finally:
+    print("Shutting down the visualizer server...")
+    await server.stop()
+
+
+async def _run(server: VisualizerServer) -> None:
+  # -- deck layout: a tip carrier, a 5-site plate carrier, a reservoir -----
+  deck = STARLetDeck()
+
+  tip_carrier = TIP_CAR_480_A00(name="tip_carrier_1")
+  tip_rack = hamilton_96_tiprack_300uL_filter(name="tip_rack_300uL")
+  tip_carrier[0] = tip_rack
+  deck.assign_child_resource(tip_carrier, rails=1)
+
+  # PLT_CAR_L5AC_A00 -- the "L5" is 5 plate sites, one per character of
+  # whatever word ends up chosen. Named by *position* (plate_0..plate_4),
+  # not by character -- a word can repeat a character (e.g. "HELLO"), so a
+  # character can't be used as a unique key the way the old fixed "ROCHE"
+  # demo's plate_R/plate_O/... naming did.
+  plate_carrier = PLT_CAR_L5AC_A00(name="plate_carrier_1")
+  plates: List[Plate] = []
+  for i in range(WORD_LENGTH):
+    plate = cor_96_wellplate_360uL_Fb(name=f"plate_{i}")
+    plate_carrier[i] = plate
+    plates.append(plate)
+  deck.assign_child_resource(plate_carrier, rails=7)
+
+  reservoir_carrier = Trough_CAR_5R60_A00(name="reservoir_carrier_1")
+  ink_reservoir = hamilton_1_trough_60mL_Vb(name="ink_reservoir")
+  reservoir_carrier[2] = ink_reservoir
+  deck.assign_child_resource(reservoir_carrier, rails=13)
 
   inner_backend = LiquidHandlerChatterboxBackend(num_channels=8)
   backend = VisualizerBackend(inner_backend, server)
@@ -872,4 +886,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-  asyncio.run(main())
+  try:
+    asyncio.run(main())
+  except KeyboardInterrupt:
+    print("\nStopped.")

@@ -147,34 +147,6 @@ def _clamped_param(params: Dict[str, Any], key: str, default: float, lo: float, 
 
 
 async def main() -> None:
-  # -- deck layout ----------------------------------------------------------
-  deck = STARLetDeck()
-
-  sample_tip_carrier = TIP_CAR_480_A00(name="sample_tip_carrier")
-  sample_tip_rack = hamilton_96_tiprack_300uL_filter(name="sample_tip_rack")
-  sample_tip_carrier[0] = sample_tip_rack
-  deck.assign_child_resource(sample_tip_carrier, rails=1)
-
-  diluent_tip_carrier = TIP_CAR_480_A00(name="diluent_tip_carrier")
-  diluent_tip_rack = hamilton_96_tiprack_300uL_filter(name="diluent_tip_rack")
-  diluent_tip_carrier[0] = diluent_tip_rack
-  deck.assign_child_resource(diluent_tip_carrier, rails=7)
-
-  source_plate_carrier = PLT_CAR_L5AC_A00(name="source_plate_carrier")
-  source_plate = cor_96_wellplate_360uL_Fb(name="source_plate")
-  source_plate_carrier[0] = source_plate
-  deck.assign_child_resource(source_plate_carrier, rails=13)
-
-  dest_plate_carrier = PLT_CAR_L5AC_A00(name="dest_plate_carrier")
-  dest_plate = cor_96_wellplate_360uL_Fb(name="dest_plate")
-  dest_plate_carrier[0] = dest_plate
-  deck.assign_child_resource(dest_plate_carrier, rails=19)
-
-  diluent_carrier = Trough_CAR_5R60_A00(name="diluent_carrier")
-  diluent_reservoir = hamilton_1_trough_60mL_Vb(name="diluent_reservoir")
-  diluent_carrier[2] = diluent_reservoir
-  deck.assign_child_resource(diluent_carrier, rails=25)
-
   # -- wire up the visualizer -------------------------------------------------
   server = VisualizerServer()
   await server.start()
@@ -206,6 +178,48 @@ async def main() -> None:
       },
     ]
   )
+
+  # Wrapped in try/finally so Ctrl-C (or any other early exit) still lets
+  # the visualizer server shut down cleanly -- server.stop() tells uvicorn
+  # to release its socket instead of leaving it bound, which is what
+  # produces a wall of tracebacks on Ctrl-C otherwise (asyncio.run()
+  # abruptly cancelling the server's own still-running background task)
+  # and also explains "port already in use" on the next run.
+  try:
+    await _run(server)
+  finally:
+    print("Shutting down the visualizer server...")
+    await server.stop()
+
+
+async def _run(server: VisualizerServer) -> None:
+  # -- deck layout ----------------------------------------------------------
+  deck = STARLetDeck()
+
+  sample_tip_carrier = TIP_CAR_480_A00(name="sample_tip_carrier")
+  sample_tip_rack = hamilton_96_tiprack_300uL_filter(name="sample_tip_rack")
+  sample_tip_carrier[0] = sample_tip_rack
+  deck.assign_child_resource(sample_tip_carrier, rails=1)
+
+  diluent_tip_carrier = TIP_CAR_480_A00(name="diluent_tip_carrier")
+  diluent_tip_rack = hamilton_96_tiprack_300uL_filter(name="diluent_tip_rack")
+  diluent_tip_carrier[0] = diluent_tip_rack
+  deck.assign_child_resource(diluent_tip_carrier, rails=7)
+
+  source_plate_carrier = PLT_CAR_L5AC_A00(name="source_plate_carrier")
+  source_plate = cor_96_wellplate_360uL_Fb(name="source_plate")
+  source_plate_carrier[0] = source_plate
+  deck.assign_child_resource(source_plate_carrier, rails=13)
+
+  dest_plate_carrier = PLT_CAR_L5AC_A00(name="dest_plate_carrier")
+  dest_plate = cor_96_wellplate_360uL_Fb(name="dest_plate")
+  dest_plate_carrier[0] = dest_plate
+  deck.assign_child_resource(dest_plate_carrier, rails=19)
+
+  diluent_carrier = Trough_CAR_5R60_A00(name="diluent_carrier")
+  diluent_reservoir = hamilton_1_trough_60mL_Vb(name="diluent_reservoir")
+  diluent_carrier[2] = diluent_reservoir
+  deck.assign_child_resource(diluent_carrier, rails=25)
 
   inner_backend = LiquidHandlerChatterboxBackend(num_channels=8)
   backend = VisualizerBackend(inner_backend, server)
@@ -335,4 +349,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-  asyncio.run(main())
+  try:
+    asyncio.run(main())
+  except KeyboardInterrupt:
+    print("\nStopped.")

@@ -4469,6 +4469,60 @@ this demo is to show we can do error handling and report in real time.").
       block itself is byte-for-byte the same as this round's first
       version.
 
+## Review round 54
+
+User: Ctrl-C-ing out of a running demo shows a wall of error messages --
+asked whether a graceful stop was possible, or a Quit button. Diagnosed
+first, on `undervolume_error_demo.py` specifically, then applied the same
+fix to every other demo script per follow-up request.
+
+- [x] **Root cause**: `VisualizerServer.start()` launches uvicorn as a
+      background `asyncio.create_task()`, but nothing ever told it to shut
+      down -- on Ctrl-C, `asyncio.run()` abruptly cancels it (and
+      everything else still running) mid-flight, which is what produces
+      the traceback wall, and also leaves its listening socket in a bad
+      state (very likely explaining several "port already in use" issues
+      hit earlier this session against stray demo processes).
+- [x] **Fix, applied uniformly to all 12 demo scripts** (the 11
+      `while True:`/run-once scripts here, plus `undervolume_error_demo.py`
+      itself, fixed the prior round): `main()`'s own body is now wrapped in
+      `try: await _run(server) finally: await server.stop()`, and the
+      outer `if __name__ == "__main__": asyncio.run(main())` is wrapped in
+      `try/except KeyboardInterrupt` to suppress the raw traceback. Chose
+      graceful-Ctrl-C over a Quit button since it was the clearly smaller
+      change (a Quit button needs a new server-side action, a UI element,
+      and every demo's own loop checking for it) that still fully
+      addresses what was reported.
+- [x] **Two different splits, depending on each script's own shape**: the
+      7 scripts with a `while True:` reset loop (`core96_demo.py`,
+      `core_gripper_demo.py`, `kapa_hyperplus_demo.py`, `pcr_setup_demo.py`,
+      `picogreen_demo.py`, `spri_cleanup_demo.py`, `thermocycler_demo.py`)
+      split cleanly right at `await server.start()` -- everything after it
+      (the entire loop, completely untouched, same indentation) becomes
+      the new `_run(server)`, a minimal insertion with zero risk of
+      touching the loop body itself. The 4 run-once scripts
+      (`cherry_pick_demo.py`, `demo_protocol.py`, `normalization_demo.py`,
+      `pixel_art_demo.py`) build their deck *before* constructing the
+      server -- reordered (confirmed safe: deck-building has zero
+      dependency on `server`, and the two files with `set_run_params()`
+      calls right after `server.start()` only reference module-level
+      constants, nothing deck-derived) so the same clean split applies
+      everywhere.
+- [x] Verified every one of the 11 newly-touched scripts (not just
+      spot-checked): imported each module directly and ran its real
+      `main()` coroutine far enough to reach deck-building + past
+      `wait_for_start()` (catching any scoping mistake from moving code
+      between `main()`/`_run()` -- there's no way a plain syntax check
+      would catch a `NameError` buried inside a function body), then fired
+      a real self-delivered `SIGINT` (`signal.raise_signal()`, the same OS
+      signal-delivery path a terminal's Ctrl-C uses -- this sandboxed
+      environment can't reliably deliver a real terminal Ctrl-C to a
+      background process, confirmed by trying `timeout -s INT` first and
+      getting no signal delivered at all). All 11: "Shutting down the
+      visualizer server..." printed, no traceback, port immediately
+      re-bindable afterward. Full `node --test ./tests/frontend/*.test.js`:
+      36/36, unaffected (Python-only change).
+
 ## Stretch / explicitly deferred (not v1)
 
 - [ ] Event capture-to-file (durable, survives a process restart) +
