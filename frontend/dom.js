@@ -16,6 +16,8 @@ const statusEl = document.getElementById("status");
 const statusTextEl = document.getElementById("status-text");
 const legendRowsEl = document.getElementById("legend-rows");
 const logListEl = document.getElementById("log-list");
+const logPanelEl = document.getElementById("log-panel");
+const logToggleBtn = document.getElementById("log-toggle");
 const replayBtn = document.getElementById("replay-btn");
 const startBtn = document.getElementById("start-btn");
 const resetBtn = document.getElementById("reset-btn");
@@ -215,6 +217,17 @@ resetBtn.addEventListener("click", () => {
 
 speedSelect.addEventListener("change", () => {
   setDurationScale(Number(speedSelect.value) || 1);
+});
+
+// Collapses the event log to a narrow strip against the right edge (see
+// index.html's own #log-panel.collapsed CSS) -- toggled here rather than
+// in main.js since every other HUD control already lives in this module.
+// The glyph flips to show what clicking it does *next* (>> = "collapse
+// me", << = "expand me"), not the current state.
+logToggleBtn.addEventListener("click", () => {
+  const collapsed = logPanelEl.classList.toggle("collapsed");
+  logToggleBtn.textContent = collapsed ? "«" : "»";
+  logToggleBtn.title = collapsed ? "Expand event log" : "Collapse event log";
 });
 
 for (const [label, color] of LEGEND_ENTRIES) {
