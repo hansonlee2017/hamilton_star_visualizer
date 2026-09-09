@@ -165,18 +165,29 @@ uv run python examples/demo_protocol.py
 ### Working on the frontend
 
 The frontend source is a Vite + TypeScript project in [`frontend/`](frontend/)
-(see its own [README](frontend/README.md)). For a live-reloading loop, run
-the demo (for the websocket data) and Vite (for the UI) side by side:
+(see its own [README](frontend/README.md)). None of this is needed just to
+*run* the visualizer -- the built bundle is committed and served from the
+package -- only to change the UI.
+
+**One-time setup** (needs [Node](https://nodejs.org/) 20.19+ / 22.12+, per
+Vite 7; installs into `frontend/node_modules/`, which is git-ignored):
+
+```bash
+npm --prefix frontend install
+```
+
+For a live-reloading loop, run the demo (for the websocket data) and Vite
+(for the UI) side by side:
 
 ```bash
 uv run python examples/demo_protocol.py    # terminal 1 -- the protocol + server on :8765
-npm --prefix frontend install              # once
 npm --prefix frontend run dev              # terminal 2 -- open the printed :5173 URL
 ```
 
 Vite proxies `/ws` through to the running protocol, so edits to
 `frontend/src/*.ts` hot-reload against live data. When you're done, rebuild
-the committed bundle that the package actually ships and serves:
+the committed bundle that the package actually ships and serves, and commit
+the regenerated `src/hamilton_visualizer/frontend/`:
 
 ```bash
 npm --prefix frontend run build
@@ -206,7 +217,8 @@ uv run pytest
 ```
 
 Frontend side (`frontend/src/gantry-planning.ts`'s motion-planning math and
-a couple of other pure-logic modules -- no browser, via Vitest):
+a couple of other pure-logic modules -- no browser, via Vitest; needs the
+one-time `npm --prefix frontend install` above):
 
 ```bash
 npm --prefix frontend test
