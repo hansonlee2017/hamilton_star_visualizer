@@ -52,10 +52,22 @@ let protocolStarted = false;
 export function logEvent(op: string, detail?: string): void {
   const entry = document.createElement("div");
   entry.className = "entry";
-  const time = new Date().toLocaleTimeString();
-  entry.innerHTML =
-    `<span class="time">${time}</span>` +
-    `<span class="op">${op}</span> <span class="detail">${detail ?? ""}</span>`;
+  // Built with textContent, not innerHTML: `detail` is assembled from
+  // resource names (see gantry.ts's dispatchOp()) that originate in
+  // PyLabRobot serialization -- protocol scripts, custom-labware JSON,
+  // CSV-derived ids -- and must never be interpreted as markup here.
+  const span = (className: string, text: string): HTMLSpanElement => {
+    const el = document.createElement("span");
+    el.className = className;
+    el.textContent = text;
+    return el;
+  };
+  entry.append(
+    span("time", new Date().toLocaleTimeString()),
+    span("op", op),
+    document.createTextNode(" "),
+    span("detail", detail ?? "")
+  );
   logListEl.insertBefore(entry, logListEl.firstChild);
   while (logListEl.children.length > 200) {
     logListEl.removeChild(logListEl.lastChild as ChildNode);

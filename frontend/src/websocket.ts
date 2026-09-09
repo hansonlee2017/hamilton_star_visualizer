@@ -29,7 +29,12 @@ export function connect(handlers: WsHandlers): void {
   ws.onerror = () => ws.close();
 
   ws.onmessage = (event: MessageEvent<string>) => {
-    const msg = JSON.parse(event.data) as ServerMessage;
+    let msg: ServerMessage;
+    try {
+      msg = JSON.parse(event.data) as ServerMessage;
+    } catch {
+      return; // a frame that isn't JSON at all -- ignore it, keep the socket
+    }
     switch (msg.type) {
       case "scene":
         handlers.onScene?.(msg);

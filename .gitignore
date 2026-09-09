@@ -14,3 +14,9 @@ frontend/.vite/
 .DS_Store
 *.log
 .env
+
+# Local-only demo scripts: the email-to-SMS alert sender and the demo that
+# uses it. Both need a local .env with real SMTP credentials, so they're
+# kept out of the distribution and the repo.
+examples/sms_message.py
+examples/undervolume_error_demo.py
