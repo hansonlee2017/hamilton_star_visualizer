@@ -6,7 +6,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { MotionUnit } from "../../frontend/motion-unit.js";
+import { MotionUnit } from "../../src/hamilton_visualizer/frontend/motion-unit.js";
 
 function makeUnit(initialPos) {
   const applied = [];

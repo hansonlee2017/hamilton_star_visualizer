@@ -11,9 +11,30 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and rationale, and
 Moving plates (iSWAP / CO-RE gripper) is out of scope -- see DESIGN.md
 section 4.
 
+## Install
+
+Into your own protocol's environment, straight from GitHub:
+
+```bash
+uv add "git+<your-repo-url>"
+```
+
+or with pip:
+
+```bash
+pip install "git+<your-repo-url>"
+```
+
+That pulls in `hamilton_visualizer` (server, backend wrappers, and the
+bundled browser frontend) plus its dependencies. Pin a tag or commit with
+`@<ref>` on the end of the URL if you want a fixed version. Requires Python
+3.14+.
+
 ## Quick start
 
-Requires [`uv`](https://docs.astral.sh/uv/).
+To run the bundled demos, work from a checkout of this repo (they live in
+`examples/`, which isn't part of the installed package). Requires
+[`uv`](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
@@ -67,9 +88,10 @@ stricter: mismatched pick-ups/insufficient volume will now raise).
   each one (resource, channel, real coordinates, volume) -- see
   [`docs/DESIGN.md`](docs/DESIGN.md) for why this is more reliable than
   parsing Chatterbox's printed/logged output.
-- The frontend (`frontend/main.js`) is vanilla JS + [Three.js](https://threejs.org/)
-  (vendored locally, no build step), rendering everything as simple boxes
-  from an orthographic camera set to a fixed isometric angle.
+- The frontend (`src/hamilton_visualizer/frontend/`, served straight from
+  the package) is vanilla JS + [Three.js](https://threejs.org/) (vendored
+  locally, no build step), rendering everything as simple boxes from an
+  orthographic camera set to a fixed isometric angle.
 
 Live mode only: open the browser *before* running your protocol to watch it
 happen. If you missed it (or just want to watch again), the **Replay**
@@ -83,8 +105,9 @@ stretch" section for a durable, capture-to-file version).
 ```
 docs/                              design doc + phased plan
 src/hamilton_visualizer/           server.py, visualizer_backend.py, scene.py, events.py
-frontend/                          index.html, main.js (also plans real gantry motion --
-                                    see planGantryPasses()), vendor/ (three.js, OrbitControls)
+src/hamilton_visualizer/frontend/  index.html, main.js (also plans real gantry motion --
+                                    see planGantryPasses()), vendor/ (three.js, OrbitControls);
+                                    packaged with the wheel and served by the server
 examples/demo_protocol.py          runnable, hardware-free demo
 examples/cherry_pick_demo.py       cherry-picking demo: an ordinary lh.dispense() onto a
                                     scattered smiley-face pattern, animated column-by-column
@@ -142,7 +165,8 @@ debugging.
 For a timestamped trace of what the animation system is actually doing
 (op events received, resources attaching/detaching, gantry waits
 computed, thermocycler animations starting/finishing), turn on
-`frontend/log.js`'s optional leveled logging -- silent by default, same
+`src/hamilton_visualizer/frontend/log.js`'s optional leveled logging --
+silent by default, same
 idea as Python's `logging` module. Either run
 `window.__log.setLevel("debug")` in the console, or open the page with
 `?logLevel=debug` in the URL; `"info"` gives a shorter high-level trace
@@ -157,9 +181,10 @@ pure decision logic, no PyLabRobot/browser involved):
 uv run pytest
 ```
 
-Frontend side (`frontend/gantry-planning.js`'s motion-planning math and a
-couple of other pure-logic modules -- no browser, no build step, via
-Node's built-in test runner; see `tests/frontend/README.md`):
+Frontend side (`src/hamilton_visualizer/frontend/gantry-planning.js`'s
+motion-planning math and a couple of other pure-logic modules -- no browser,
+no build step, via Node's built-in test runner; see
+`tests/frontend/README.md`):
 
 ```bash
 node --test ./tests/frontend/*.test.js

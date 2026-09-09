@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { tipColorForVolume } from "../../frontend/categories.js";
+import { tipColorForVolume } from "../../src/hamilton_visualizer/frontend/categories.js";
 
 test("tipColorForVolume buckets by nameplate capacity", () => {
   assert.equal(tipColorForVolume(10), 0xf48fb1); // pink, <=50uL

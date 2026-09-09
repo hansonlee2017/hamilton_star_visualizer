@@ -3,10 +3,23 @@ name = "hamilton-visualizer"
 version = "0.1.0"
 description = "Browser-based isometric visualizer for PyLabRobot Hamilton STAR runs"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Hanson Lee", email = "hanson.lee.synapse@gmail.com" }
 ]
 requires-python = ">=3.14"
+keywords = ["pylabrobot", "hamilton", "star", "liquid-handling", "visualizer", "lab-automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
 dependencies = [
     "fastapi>=0.141.1",
     "pylabrobot>=0.2.2",
@@ -17,6 +30,14 @@ dependencies = [
 
 [project.scripts]
 hamilton-visualizer = "hamilton_visualizer:main"
+
+[tool.uv.build-backend]
+# The frontend ships inside the package (src/hamilton_visualizer/frontend/).
+# Its node_modules/ holds only a ~10-line shim so `node --test` can resolve
+# the bare "three" specifier during development -- no runtime value, keep it
+# out of the built sdist/wheel.
+source-exclude = ["src/hamilton_visualizer/frontend/node_modules"]
+wheel-exclude = ["frontend/node_modules"]
 
 [dependency-groups]
 dev = [

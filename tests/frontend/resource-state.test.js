@@ -9,8 +9,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { volumeVisual, tipVisual } from "../../frontend/resource-state.js";
-import { EMPTY_COLOR, EMPTY_OPACITY, FULL_OPACITY } from "../../frontend/categories.js";
+import { volumeVisual, tipVisual } from "../../src/hamilton_visualizer/frontend/resource-state.js";
+import { EMPTY_COLOR, EMPTY_OPACITY, FULL_OPACITY } from "../../src/hamilton_visualizer/frontend/categories.js";
 
 test("volumeVisual at 0% is fully empty-colored and at empty opacity", () => {
   const { color, opacity } = volumeVisual(0, 100);

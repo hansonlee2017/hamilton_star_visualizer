@@ -4,7 +4,7 @@
 
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { LEVELS, setLevel, getLevel, makeLogger } from "../../frontend/log.js";
+import { LEVELS, setLevel, getLevel, makeLogger } from "../../src/hamilton_visualizer/frontend/log.js";
 
 describe("log", () => {
   // console.debug/info/warn/error are stubbed per test and restored

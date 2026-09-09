@@ -6,7 +6,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { AnimationQueue } from "../../frontend/animation-queue.js";
+import { AnimationQueue } from "../../src/hamilton_visualizer/frontend/animation-queue.js";
 
 describe("AnimationQueue", () => {
   test("a single task runs its onStart once, ticks with linear t, and completes at t=1", () => {

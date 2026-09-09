@@ -28,8 +28,10 @@ from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
 
-# src/hamilton_visualizer/server.py -> repo root -> frontend/
-FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+# Shipped inside the package (src/hamilton_visualizer/frontend/), so this
+# resolves the same whether you're running from a repo checkout or an
+# installed wheel.
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 
 # Cap on how long a replayed gap between two events can be, in seconds --
 # without this, replaying a run where you took a real 10-minute break
@@ -102,9 +104,9 @@ class VisualizerServer:
   def _build_app(self) -> FastAPI:
     if not FRONTEND_DIR.is_dir():
       raise RuntimeError(
-        f"Frontend directory not found at {FRONTEND_DIR}. "
-        "hamilton-visualizer must be run from a checkout of the repo "
-        "(it is not packaged into installed wheels)."
+        f"Frontend directory not found at {FRONTEND_DIR}. It ships inside the "
+        "hamilton_visualizer package, so this usually means a broken install "
+        "-- try reinstalling the package."
       )
 
     app = FastAPI()

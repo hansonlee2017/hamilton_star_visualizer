@@ -23,12 +23,15 @@ __all__ = ["VisualizerServer", "VisualizerBackend", "VisualizerThermocyclerBacke
 
 
 def main() -> None:
-  """Entry point for `uv run hamilton-visualizer` -- this package is a
-  library, not a standalone app, so this just points you at the demo."""
+  """Entry point for the `hamilton-visualizer` console script -- this package
+  is a library you import into your own protocol, not a standalone app, so
+  this just points you at how to use it."""
 
   print(
     "hamilton-visualizer is a library you import into your own PyLabRobot\n"
-    "protocol script (see the module docstring / README.md). To see it in\n"
-    "action without any hardware, run the bundled demo instead:\n\n"
-    "    uv run python examples/demo_protocol.py\n"
+    "protocol script:\n\n"
+    "    from hamilton_visualizer import VisualizerBackend, VisualizerServer\n\n"
+    "See the README for the full wiring, and the runnable, hardware-free\n"
+    "demos under examples/ in the source repo (clone it, then run e.g.\n"
+    "`uv run python examples/demo_protocol.py`).\n"
   )

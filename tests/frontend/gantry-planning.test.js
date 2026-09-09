@@ -6,7 +6,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { CHANNEL_PITCH_MM, resolveChannelYs, planGantryPasses } from "../../frontend/gantry-planning.js";
+import { CHANNEL_PITCH_MM, resolveChannelYs, planGantryPasses } from "../../src/hamilton_visualizer/frontend/gantry-planning.js";
 
 // A plain `{ pos: { y } }` array -- planGantryPasses() only ever reads
 // `.pos.y` and `.keys()` off this, nothing THREE.js-shaped.

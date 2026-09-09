@@ -159,23 +159,23 @@ HamiltonVisualizer/
 │   └── hamilton_visualizer/
 │       ├── server.py            # FastAPI app, websocket endpoint
 │       ├── visualizer_backend.py  # LiquidHandlerBackend decorator
-│       └── scene.py             # resource-tree -> scene graph serialization
-├── frontend/
-│   ├── index.html
-│   ├── main.js            # thin orchestrator: viewport, websocket wiring, render loop
-│   ├── coordinates.js      # PyLabRobot <-> Three.js coordinate mapping
-│   ├── categories.js       # category/tip color palette + legend data
-│   ├── duration-scale.js   # HUD playback-speed multiplier
-│   ├── scene-builder.js    # scene graph -> Three.js object construction
-│   ├── resource-state.js   # live tip/volume/protocol-summary updates
-│   ├── thermocycler.js     # lid-slide + cycling-shimmer animation
-│   ├── gantry-planning.js  # pure motion-planning math (unit-tested, see tests/frontend/)
-│   ├── gantry.js           # 8-channel arm + CO-RE 96 head + "op" dispatch
-│   ├── dom.js              # DOM handles, event log, HUD wiring
-│   ├── websocket.js        # the websocket connection itself
-│   ├── tooltip.js          # hover tooltips
-│   └── vendor/
-│       └── three.module.js
+│       ├── scene.py             # resource-tree -> scene graph serialization
+│       └── frontend/           # packaged with the wheel, served by server.py
+│           ├── index.html
+│           ├── main.js            # thin orchestrator: viewport, websocket wiring, render loop
+│           ├── coordinates.js      # PyLabRobot <-> Three.js coordinate mapping
+│           ├── categories.js       # category/tip color palette + legend data
+│           ├── duration-scale.js   # HUD playback-speed multiplier
+│           ├── scene-builder.js    # scene graph -> Three.js object construction
+│           ├── resource-state.js   # live tip/volume/protocol-summary updates
+│           ├── thermocycler.js     # lid-slide + cycling-shimmer animation
+│           ├── gantry-planning.js  # pure motion-planning math (unit-tested, see tests/frontend/)
+│           ├── gantry.js           # 8-channel arm + CO-RE 96 head + "op" dispatch
+│           ├── dom.js              # DOM handles, event log, HUD wiring
+│           ├── websocket.js        # the websocket connection itself
+│           ├── tooltip.js          # hover tooltips
+│           └── vendor/
+│               └── three.module.js
 ├── examples/
 │   └── demo_protocol.py   # STARChatterboxBackend + STARLetDeck demo run
 ├── pyproject.toml
