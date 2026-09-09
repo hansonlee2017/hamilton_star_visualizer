@@ -16,13 +16,13 @@ section 4.
 Into your own protocol's environment, straight from GitHub:
 
 ```bash
-uv add "git+<your-repo-url>"
+uv add "git+https://github.com/hansonlee2017/hamilton_star_visualizer"
 ```
 
 or with pip:
 
 ```bash
-pip install "git+<your-repo-url>"
+pip install "git+https://github.com/hansonlee2017/hamilton_star_visualizer"
 ```
 
 That pulls in `hamilton_visualizer` (server, backend wrappers, and the

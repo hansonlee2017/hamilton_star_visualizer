@@ -28,6 +28,11 @@ dependencies = [
     "websockets>=17.0.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/hansonlee2017/hamilton_star_visualizer"
+Repository = "https://github.com/hansonlee2017/hamilton_star_visualizer"
+Issues = "https://github.com/hansonlee2017/hamilton_star_visualizer/issues"
+
 [project.scripts]
 hamilton-visualizer = "hamilton_visualizer:main"
 
