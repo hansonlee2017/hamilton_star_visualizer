@@ -1,4 +1,0 @@
-{
-  "type": "module",
-  "comment": "Marks tests/frontend/*.js (and, via Node's syntax detection, the src/hamilton_visualizer/frontend/*.js modules they import) as ES modules for Node's resolver -- no dependencies, no build step, no npm install needed (see this directory's README.md). Node auto-detects ESM syntax in plain .js files on its own in recent versions, but this makes it explicit rather than relying on that heuristic."
-}

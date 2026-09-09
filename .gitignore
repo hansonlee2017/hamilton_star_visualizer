@@ -7,13 +7,10 @@ uv.lock.tmp
 dist/
 *.egg-info/
 node_modules/
-# Exception: not a real npm install -- a tiny package.json pointing "three"
-# at the already-vendored frontend/vendor/three.module.js, so `node --test`
-# can resolve the frontend's existing `import ... from "three"` the same
-# way the browser's own importmap does. See that file's own comment.
-!src/hamilton_visualizer/frontend/node_modules/
-!src/hamilton_visualizer/frontend/node_modules/three/
-!src/hamilton_visualizer/frontend/node_modules/three/package.json
+# The frontend Vite project's own local caches (frontend/dist is not used --
+# its build output goes to src/hamilton_visualizer/frontend/, which IS
+# tracked; see frontend/vite.config.ts).
+frontend/.vite/
 .DS_Store
 *.log
 .env

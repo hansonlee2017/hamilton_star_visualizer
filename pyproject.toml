@@ -31,13 +31,11 @@ dependencies = [
 [project.scripts]
 hamilton-visualizer = "hamilton_visualizer:main"
 
-[tool.uv.build-backend]
-# The frontend ships inside the package (src/hamilton_visualizer/frontend/).
-# Its node_modules/ holds only a ~10-line shim so `node --test` can resolve
-# the bare "three" specifier during development -- no runtime value, keep it
-# out of the built sdist/wheel.
-source-exclude = ["src/hamilton_visualizer/frontend/node_modules"]
-wheel-exclude = ["frontend/node_modules"]
+# The browser frontend is a Vite + TypeScript project under frontend/ (dev
+# only, not part of the distribution). Its production build is committed to
+# src/hamilton_visualizer/frontend/ (index.html + hashed assets/) and ships
+# with the wheel, so `uv build` / `pip install` needs no Node -- run
+# `npm --prefix frontend run build` after changing anything under frontend/src/.
 
 [dependency-groups]
 dev = [

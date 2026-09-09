@@ -97,7 +97,9 @@ the static frontend and streams the three event kinds above.
 
 ### Frontend
 
-Static HTML/JS. Three.js, vendored locally (no JS build step), with an
+TypeScript + Three.js, bundled with Vite (source in `frontend/`, build
+output committed to `src/hamilton_visualizer/frontend/` and served
+statically), with an
 **orthographic camera** angled to a standard isometric view. Deck, carriers,
 plates, tip racks, wells, and tip spots render as simple `BoxGeometry` at
 their real coordinates. Three.js gives correct depth-sorting/occlusion for
@@ -160,22 +162,18 @@ HamiltonVisualizer/
 │       ├── server.py            # FastAPI app, websocket endpoint
 │       ├── visualizer_backend.py  # LiquidHandlerBackend decorator
 │       ├── scene.py             # resource-tree -> scene graph serialization
-│       └── frontend/           # packaged with the wheel, served by server.py
-│           ├── index.html
-│           ├── main.js            # thin orchestrator: viewport, websocket wiring, render loop
-│           ├── coordinates.js      # PyLabRobot <-> Three.js coordinate mapping
-│           ├── categories.js       # category/tip color palette + legend data
-│           ├── duration-scale.js   # HUD playback-speed multiplier
-│           ├── scene-builder.js    # scene graph -> Three.js object construction
-│           ├── resource-state.js   # live tip/volume/protocol-summary updates
-│           ├── thermocycler.js     # lid-slide + cycling-shimmer animation
-│           ├── gantry-planning.js  # pure motion-planning math (unit-tested, see tests/frontend/)
-│           ├── gantry.js           # 8-channel arm + CO-RE 96 head + "op" dispatch
-│           ├── dom.js              # DOM handles, event log, HUD wiring
-│           ├── websocket.js        # the websocket connection itself
-│           ├── tooltip.js          # hover tooltips
-│           └── vendor/
-│               └── three.module.js
+│       └── frontend/           # committed Vite build (index.html + assets/),
+│                               #   packaged with the wheel, served by server.py
+├── frontend/                   # frontend source -- Vite + TypeScript project (dev only)
+│   ├── src/
+│   │   ├── main.ts             # thin orchestrator: viewport, websocket wiring, render loop
+│   │   ├── gantry-planning.ts  # pure motion-planning math (unit-tested, see frontend/test/)
+│   │   ├── gantry.ts           # 8-channel arm + CO-RE 96 head + CoRe gripper + "op" dispatch
+│   │   ├── scene-builder.ts    # scene graph -> Three.js object construction
+│   │   └── ...                 # one module per concern -- see frontend/README.md
+│   ├── test/                   # Vitest unit tests for the pure-logic modules
+│   ├── index.html
+│   └── vite.config.ts
 ├── examples/
 │   └── demo_protocol.py   # STARChatterboxBackend + STARLetDeck demo run
 ├── pyproject.toml

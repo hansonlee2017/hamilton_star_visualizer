@@ -1,0 +1,23 @@
+{
+  "name": "hamilton-visualizer-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser frontend for hamilton-visualizer -- Vite + TypeScript + Three.js. Built output is committed to ../src/hamilton_visualizer/frontend/ and served by the Python package; see README.md.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "three": "~0.185.0"
+  },
+  "devDependencies": {
+    "@types/three": "~0.185.0",
+    "typescript": "~5.9.0",
+    "vite": "~7.1.0",
+    "vitest": "~3.2.0"
+  }
+}

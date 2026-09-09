@@ -88,10 +88,12 @@ stricter: mismatched pick-ups/insufficient volume will now raise).
   each one (resource, channel, real coordinates, volume) -- see
   [`docs/DESIGN.md`](docs/DESIGN.md) for why this is more reliable than
   parsing Chatterbox's printed/logged output.
-- The frontend (`src/hamilton_visualizer/frontend/`, served straight from
-  the package) is vanilla JS + [Three.js](https://threejs.org/) (vendored
-  locally, no build step), rendering everything as simple boxes from an
-  orthographic camera set to a fixed isometric angle.
+- The frontend is a [TypeScript](https://www.typescriptlang.org/) +
+  [Three.js](https://threejs.org/) app (source in `frontend/`, built with
+  [Vite](https://vite.dev/)), rendering everything as simple boxes from an
+  orthographic camera set to a fixed isometric angle. Its production build
+  is committed to `src/hamilton_visualizer/frontend/` and served straight
+  from the installed package, so running the visualizer never needs Node.
 
 Live mode only: open the browser *before* running your protocol to watch it
 happen. If you missed it (or just want to watch again), the **Replay**
@@ -105,9 +107,10 @@ stretch" section for a durable, capture-to-file version).
 ```
 docs/                              design doc + phased plan
 src/hamilton_visualizer/           server.py, visualizer_backend.py, scene.py, events.py
-src/hamilton_visualizer/frontend/  index.html, main.js (also plans real gantry motion --
-                                    see planGantryPasses()), vendor/ (three.js, OrbitControls);
+src/hamilton_visualizer/frontend/  committed Vite build output (index.html + assets/);
                                     packaged with the wheel and served by the server
+frontend/                          the frontend's TypeScript source (Vite project) --
+                                    src/*.ts, test/*.test.ts; dev only, not in the wheel
 examples/demo_protocol.py          runnable, hardware-free demo
 examples/cherry_pick_demo.py       cherry-picking demo: an ordinary lh.dispense() onto a
                                     scattered smiley-face pattern, animated column-by-column
@@ -153,8 +156,30 @@ examples/core96_demo.py            CO-RE 96 head demo: picks up all 96 tips from
 
 ## Development
 
+Running a demo (no Node needed -- it serves the committed frontend build):
+
 ```bash
 uv run python examples/demo_protocol.py
+```
+
+### Working on the frontend
+
+The frontend source is a Vite + TypeScript project in [`frontend/`](frontend/)
+(see its own [README](frontend/README.md)). For a live-reloading loop, run
+the demo (for the websocket data) and Vite (for the UI) side by side:
+
+```bash
+uv run python examples/demo_protocol.py    # terminal 1 -- the protocol + server on :8765
+npm --prefix frontend install              # once
+npm --prefix frontend run dev              # terminal 2 -- open the printed :5173 URL
+```
+
+Vite proxies `/ws` through to the running protocol, so edits to
+`frontend/src/*.ts` hot-reload against live data. When you're done, rebuild
+the committed bundle that the package actually ships and serves:
+
+```bash
+npm --prefix frontend run build
 ```
 
 Open the browser console and inspect `window.__viz` (scene/camera/gantry
@@ -165,8 +190,7 @@ debugging.
 For a timestamped trace of what the animation system is actually doing
 (op events received, resources attaching/detaching, gantry waits
 computed, thermocycler animations starting/finishing), turn on
-`src/hamilton_visualizer/frontend/log.js`'s optional leveled logging --
-silent by default, same
+`frontend/src/log.ts`'s optional leveled logging -- silent by default, same
 idea as Python's `logging` module. Either run
 `window.__log.setLevel("debug")` in the console, or open the page with
 `?logLevel=debug` in the URL; `"info"` gives a shorter high-level trace
@@ -181,11 +205,15 @@ pure decision logic, no PyLabRobot/browser involved):
 uv run pytest
 ```
 
-Frontend side (`src/hamilton_visualizer/frontend/gantry-planning.js`'s
-motion-planning math and a couple of other pure-logic modules -- no browser,
-no build step, via Node's built-in test runner; see
-`tests/frontend/README.md`):
+Frontend side (`frontend/src/gantry-planning.ts`'s motion-planning math and
+a couple of other pure-logic modules -- no browser, via Vitest):
 
 ```bash
-node --test ./tests/frontend/*.test.js
+npm --prefix frontend test
+```
+
+Type-check the whole frontend without emitting:
+
+```bash
+npm --prefix frontend run typecheck
 ```
