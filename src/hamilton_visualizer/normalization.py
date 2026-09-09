@@ -213,13 +213,26 @@ def load_samples_csv(path: Union[str, Path]) -> List[WellSample]:
     missing = set(INPUT_CSV_FIELDS) - set(reader.fieldnames or [])
     if missing:
       raise ValueError(f"{path}: missing required column(s): {sorted(missing)}")
-    for row in reader:
+    # `enumerate` from 2 so the number matches the file's own line numbering
+    # (row 1 is the header) in the error message below.
+    for line_no, row in enumerate(reader, start=2):
+      # A short row leaves required keys as None (csv.DictReader's default
+      # restval); catch that here with a row-numbered message instead of a
+      # bare `float(None)` TypeError three lines down.
+      blank = [f for f in INPUT_CSV_FIELDS if row.get(f) in (None, "")]
+      if blank:
+        raise ValueError(f"{path}: row {line_no}: empty/missing value(s) for {blank}")
+      try:
+        concentration = float(row["concentration"])
+        volume = float(row["volume"])
+      except ValueError as exc:
+        raise ValueError(f"{path}: row {line_no}: non-numeric concentration/volume: {exc}") from exc
       samples.append(
         WellSample(
           sample_name=row["sample_name"],
           well=row["well"],
-          concentration=float(row["concentration"]),
-          volume=float(row["volume"]),
+          concentration=concentration,
+          volume=volume,
         )
       )
   return samples

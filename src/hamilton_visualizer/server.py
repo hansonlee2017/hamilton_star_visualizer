@@ -14,6 +14,7 @@ is no separate process to manage. Typical usage in a protocol script::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -43,6 +44,15 @@ MAX_REPLAY_GAP = 2.0
 # replay, but the run stays watchable live the whole time either way.
 MAX_EVENT_HISTORY = 5000
 
+# Per-client timeout for sending a single broadcast frame. A browser tab
+# that completes the websocket handshake and then stops reading
+# (backgrounded, wedged, or deliberately malicious) otherwise applies TCP
+# backpressure straight into ``await websocket.send_text`` -- and since
+# this all runs on the same asyncio loop as the protocol itself, that
+# would stall the actual run. A client that can't accept a frame within
+# this window is dropped instead.
+SEND_TIMEOUT = 5.0
+
 
 def _json_safe(value: Any) -> Any:
   """Recursively replace non-finite floats (``inf``/``-inf``/``nan``) with
@@ -57,7 +67,7 @@ def _json_safe(value: Any) -> Any:
     return value if value == value and value not in (float("inf"), float("-inf")) else None
   if isinstance(value, dict):
     return {k: _json_safe(v) for k, v in value.items()}
-  if isinstance(value, list):
+  if isinstance(value, (list, tuple)):
     return [_json_safe(v) for v in value]
   return value
 
@@ -65,11 +75,33 @@ def _json_safe(value: Any) -> Any:
 class VisualizerServer:
   """Owns the websocket connections and the latest scene graph."""
 
-  def __init__(self, host: str = "127.0.0.1", port: int = 8765):
+  def __init__(
+    self,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    allowed_origins: Optional[List[str]] = None,
+  ):
     self.host = host
     self.port = port
+    # Browsers send an ``Origin`` header on the websocket handshake. The
+    # ``/ws`` channel can start/reset/replay the run, so a page served from
+    # anywhere other than this visualizer's own URL must not be able to
+    # drive it just because the socket happens to be reachable on
+    # 127.0.0.1 (a drive-by site, or DNS rebinding). ``None`` derives the
+    # obvious localhost set from host/port; pass an explicit list to widen
+    # it. Non-browser clients (the test suite, a CLI) send no ``Origin``
+    # and are always allowed.
+    self._allowed_origins: Set[str] = (
+      self._default_allowed_origins() if allowed_origins is None else set(allowed_origins)
+    )
     self._clients: Set[WebSocket] = set()
     self._send_locks: Dict[WebSocket, asyncio.Lock] = {}
+    # Strong references to in-flight schedule_broadcast() tasks: asyncio
+    # only keeps a *weak* reference to a bare create_task(), so without
+    # this the broadcast coroutine can be garbage-collected mid-send and
+    # the event silently dropped.
+    self._bg_tasks: Set["asyncio.Task[None]"] = set()
     self._scene: Optional[Dict[str, Any]] = None
     self._num_channels: Optional[int] = None
     # Opt-in HUD run-param fields (see set_run_params()) -- empty means "no
@@ -100,6 +132,14 @@ class VisualizerServer:
     # wait_for_reset().
     self._reset_event = asyncio.Event()
     self.app = self._build_app()
+
+  def _default_allowed_origins(self) -> Set[str]:
+    """``http(s)://<host>:<port>`` for this server's own host plus the
+    usual loopback aliases -- what a browser tab actually opened on the
+    printed URL sends as its ``Origin``."""
+
+    hosts = {self.host, "127.0.0.1", "localhost", "[::1]"}
+    return {f"{scheme}://{h}:{self.port}" for h in hosts for scheme in ("http", "https")}
 
   def _build_app(self) -> FastAPI:
     if not FRONTEND_DIR.is_dir():
@@ -133,6 +173,16 @@ class VisualizerServer:
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
+      # Turn away a cross-origin handshake *before* accepting it -- see
+      # self._allowed_origins. A browser always sends Origin, so a
+      # drive-by page on another site (or one reaching 127.0.0.1 via DNS
+      # rebinding) is rejected here; a non-browser client sends none and
+      # is allowed through.
+      origin = websocket.headers.get("origin")
+      if origin is not None and origin not in self._allowed_origins:
+        logger.warning("rejecting websocket handshake from disallowed origin %r", origin)
+        await websocket.close(code=1008)
+        return
       await websocket.accept()
       self._clients.add(websocket)
       self._send_locks[websocket] = asyncio.Lock()
@@ -352,7 +402,10 @@ class VisualizerServer:
     ``await``. Must be called while an event loop is running.
     """
 
-    asyncio.create_task(self.broadcast(event))
+    task = asyncio.create_task(self.broadcast(event))
+    # Hold a strong reference until it finishes -- see self._bg_tasks.
+    self._bg_tasks.add(task)
+    task.add_done_callback(self._bg_tasks.discard)
 
   async def broadcast(self, event: Dict[str, Any]) -> None:
     # Recorded regardless of whether anyone's currently connected, so a
@@ -363,12 +416,26 @@ class VisualizerServer:
       # Keep only the latest state per resource -- see _latest_state's
       # docstring for why new connections need this, not just history.
       self._latest_state[event["resource"]] = event
-    for client in list(self._clients):
-      try:
-        await self._send(client, event)
-      except Exception:  # noqa: BLE001 - a dead socket shouldn't break the run
-        self._clients.discard(client)
-        self._send_locks.pop(client, None)
+    clients = list(self._clients)
+    if clients:
+      # Concurrently, not one-await-at-a-time: a single slow client must
+      # not delay delivery to the others, or (worse) the protocol loop
+      # this runs on. Each _send() still takes that client's own
+      # per-socket lock, so ordering to any one client is preserved.
+      await asyncio.gather(*(self._send_to_client(c, event) for c in clients))
+
+  async def _send_to_client(self, websocket: WebSocket, event: Dict[str, Any]) -> None:
+    """One broadcast frame to one client, bounded by ``SEND_TIMEOUT``. A
+    client that can't accept it in time (or errors) is dropped, never
+    allowed to stall the caller. Never raises."""
+
+    try:
+      await asyncio.wait_for(self._send(websocket, event), timeout=SEND_TIMEOUT)
+    except Exception:  # noqa: BLE001 - a dead/slow socket shouldn't break the run
+      self._clients.discard(websocket)
+      self._send_locks.pop(websocket, None)
+      with contextlib.suppress(Exception):
+        await asyncio.wait_for(websocket.close(code=1011), timeout=SEND_TIMEOUT)
 
   async def replay(self, websocket: WebSocket) -> None:
     """Re-send this server's whole recorded event history to ``websocket``,
